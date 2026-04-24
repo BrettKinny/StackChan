@@ -203,12 +203,32 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     };
     esp_timer_create(&bubble_timer_args, &bubble_clear_timer_);
 
+    // Thinking timer: fires after 1.5s in listening state to show thinking animation
+    esp_timer_create_args_t thinking_timer_args = {
+        .callback = [](void* arg) {
+            auto* display = static_cast<StackChanAvatarDisplay*>(arg);
+            if (display->in_listening_status_) {
+                display->SetEmotion("thinking");
+            }
+        },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "thinking_timer",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&thinking_timer_args, &thinking_timer_);
+
     // Robot will be created later in SetupXiaoZhiUI()
 }
 
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+
+    if (thinking_timer_ != nullptr) {
+        esp_timer_stop(thinking_timer_);
+        esp_timer_delete(thinking_timer_);
+    }
 
     if (bubble_clear_timer_ != nullptr) {
         esp_timer_stop(bubble_clear_timer_);
@@ -322,7 +342,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
-    // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
+    ESP_LOGI(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
 
@@ -371,8 +391,8 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
             thinking_modifier_id_ = stackchan.addModifier(std::make_unique<ThinkingModifier>());
         }
 
-        thinking_led_pending_ = true;
         if (in_listening_status_) {
+            thinking_led_pending_ = true;
             set_left_leds(50, 25, 0);
         }
     } else if (strcmp(emotion, "doubtful") == 0) {
@@ -518,19 +538,19 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             thinking_modifier_id_ = -1;
         }
 
-        if (thinking_led_pending_) {
-            set_left_leds(50, 25, 0);
-        } else {
-            set_left_leds(0, 50, 0);
-        }
+        thinking_led_pending_ = false;
+        set_left_leds(0, 50, 0);
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
+
+        esp_timer_stop(thinking_timer_);
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
         in_listening_status_ = false;
         thinking_led_pending_ = false;
+        esp_timer_stop(thinking_timer_);
 
         if (speaking_modifier_id_ >= 0) {
             stackchan.removeModifier(speaking_modifier_id_);
@@ -553,6 +573,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         in_listening_status_ = false;
         thinking_led_pending_ = false;
+        esp_timer_stop(thinking_timer_);
         if (thinking_modifier_id_ >= 0) {
             stackchan.removeModifier(thinking_modifier_id_);
             thinking_modifier_id_ = -1;

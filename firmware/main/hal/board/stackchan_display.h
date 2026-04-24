@@ -23,6 +23,7 @@ private:
     bool thinking_led_pending_          = false;
     bool in_listening_status_           = false;
     esp_timer_handle_t bubble_clear_timer_            = nullptr;
+    esp_timer_handle_t thinking_timer_                = nullptr;
 
     lv_obj_t* preview_image_                         = nullptr;
     esp_timer_handle_t preview_timer_                = nullptr;
