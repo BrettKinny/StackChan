@@ -304,6 +304,14 @@ void StackChanAvatarDisplay::LvglUnlock()
     Unlock();
 }
 
+static void set_left_leds(uint8_t r, uint8_t g, uint8_t b)
+{
+    for (int i = 0; i < 6; i++) {
+        GetHAL().setRgbColor(i, r, g, b);
+    }
+    GetHAL().refreshRgb();
+}
+
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 {
     auto& stackchan = GetStackChan();
@@ -351,9 +359,22 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         motion.pitchServo().moveWithSpeed(0, 80);
 
     } else if (strcmp(emotion, "thinking") == 0) {
+        if (speaking_modifier_id_ >= 0) {
+            stackchan.removeModifier(speaking_modifier_id_);
+            avatar.mouth().setWeight(0);
+            speaking_modifier_id_ = -1;
+        }
+
         avatar.setEmotion(Emotion::Doubt);
-        GetHAL().setRgbColor(0, 50, 25, 0);
-        GetHAL().refreshRgb();
+
+        if (thinking_modifier_id_ < 0) {
+            thinking_modifier_id_ = stackchan.addModifier(std::make_unique<ThinkingModifier>());
+        }
+
+        thinking_led_pending_ = true;
+        if (in_listening_status_) {
+            set_left_leds(50, 25, 0);
+        }
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
     } else {
@@ -485,46 +506,65 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     bool is_listening = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        in_listening_status_ = true;
         if (speaking_modifier_id_ >= 0) {
-            // Start speaking
             stackchan.removeModifier(speaking_modifier_id_);
             avatar.mouth().setWeight(0);
             speaking_modifier_id_ = -1;
         }
+        if (thinking_modifier_id_ >= 0) {
+            stackchan.removeModifier(thinking_modifier_id_);
+            avatar.mouth().setWeight(0);
+            thinking_modifier_id_ = -1;
+        }
 
-        GetHAL().setRgbColor(0, 0, 50, 0);
-        GetHAL().refreshRgb();
+        if (thinking_led_pending_) {
+            set_left_leds(50, 25, 0);
+        } else {
+            set_left_leds(0, 50, 0);
+        }
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
+        in_listening_status_ = false;
+        thinking_led_pending_ = false;
 
         if (speaking_modifier_id_ >= 0) {
-            // Stop speaking
             stackchan.removeModifier(speaking_modifier_id_);
             avatar.mouth().setWeight(0);
             speaking_modifier_id_ = -1;
         }
+        if (thinking_modifier_id_ >= 0) {
+            stackchan.removeModifier(thinking_modifier_id_);
+            avatar.mouth().setWeight(0);
+            thinking_modifier_id_ = -1;
+        }
 
         is_idle = true;
 
-        GetHAL().setRgbColor(0, 0, 0, 0);
-        GetHAL().refreshRgb();
+        set_left_leds(0, 0, 0);
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        in_listening_status_ = false;
+        thinking_led_pending_ = false;
+        if (thinking_modifier_id_ >= 0) {
+            stackchan.removeModifier(thinking_modifier_id_);
+            thinking_modifier_id_ = -1;
+        }
+
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>());
         }
 
         esp_timer_stop(bubble_clear_timer_);
 
-        GetHAL().setRgbColor(0, 0, 0, 50);
-        GetHAL().refreshRgb();
+        set_left_leds(0, 0, 50);
     } else {
         avatar.setSpeech(status);
     }

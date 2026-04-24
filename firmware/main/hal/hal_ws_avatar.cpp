@@ -208,12 +208,14 @@ public:
                 // }
                 case DataType::StartCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Start Camera Stream");
+                    GetHAL().setCameraLedActive(true);
                     setStreamingEnabled(true);
                     _websocket->Send("camera stream started");
                     break;
                 }
                 case DataType::StopCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Stop Camera Stream");
+                    GetHAL().setCameraLedActive(false);
                     setStreamingEnabled(false);
                     _websocket->Send("camera stream stopped");
                     break;
