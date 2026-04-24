@@ -30,6 +30,11 @@ void AppLauncher::onLauncherOpen()
         mclog::tagInfo(getAppInfo().name, "app not configured, start startup worker");
         _startup_worker = std::make_unique<setup_workers::StartupWorker>();
     } else {
+        auto apps = getAppProps();
+        if (apps.size() == 1) {
+            openApp(apps[0].appID);
+            return;
+        }
         create_launcher_view();
     }
 }

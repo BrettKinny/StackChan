@@ -2,9 +2,9 @@
 set(XIAOZHI_MAIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xiaozhi-esp32/main")
 
 file(GLOB_RECURSE STACK_CHAN_SOURCES
-    "apps/*.c"
-    "apps/*.cc"
-    "apps/*.cpp"
+    "apps/app_launcher/*.c" "apps/app_launcher/*.cc" "apps/app_launcher/*.cpp"
+    "apps/app_setup/*.c" "apps/app_setup/*.cc" "apps/app_setup/*.cpp"
+    "apps/common/*.c" "apps/common/*.cc" "apps/common/*.cpp"
     "assets/*.c"
     "assets/*.cc"
     "assets/*.cpp"

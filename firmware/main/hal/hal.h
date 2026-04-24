@@ -245,6 +245,7 @@ public:
     void setLaserEnabled(bool enabled);
 
     /* ------------------------------- Warm Reboot ------------------------------ */
+    static constexpr int kWarmRebootSettings = 99;
     void requestWarmReboot(int appIndex);
     int getWarmRebootTarget();
     void clearWarmRebootRequest();
