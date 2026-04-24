@@ -190,12 +190,30 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         Unlock();
     }
 
+    // Bubble auto-clear timer (fires after speaking ends)
+    esp_timer_create_args_t bubble_timer_args = {
+        .callback = [](void* arg) {
+            auto* display = static_cast<StackChanAvatarDisplay*>(arg);
+            display->ClearChatMessages();
+        },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "bubble_clear_timer",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&bubble_timer_args, &bubble_clear_timer_);
+
     // Robot will be created later in SetupXiaoZhiUI()
 }
 
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+
+    if (bubble_clear_timer_ != nullptr) {
+        esp_timer_stop(bubble_clear_timer_);
+        esp_timer_delete(bubble_clear_timer_);
+    }
 
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
@@ -332,6 +350,10 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         auto& motion = GetStackChan().motion();
         motion.pitchServo().moveWithSpeed(0, 80);
 
+    } else if (strcmp(emotion, "thinking") == 0) {
+        avatar.setEmotion(Emotion::Doubt);
+        GetHAL().setRgbColor(0, 50, 25, 0);
+        GetHAL().refreshRgb();
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
     } else {
@@ -370,6 +392,10 @@ void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* conten
 
 void StackChanAvatarDisplay::ClearChatMessages()
 {
+    if (bubble_clear_timer_) {
+        esp_timer_stop(bubble_clear_timer_);
+    }
+
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
         return;
@@ -469,6 +495,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().setRgbColor(0, 0, 50, 0);
         GetHAL().refreshRgb();
 
+        esp_timer_stop(bubble_clear_timer_);
+        esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
+
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
 
@@ -484,10 +513,15 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().setRgbColor(0, 0, 0, 0);
         GetHAL().refreshRgb();
 
+        esp_timer_stop(bubble_clear_timer_);
+        esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
+
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>());
         }
+
+        esp_timer_stop(bubble_clear_timer_);
 
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
