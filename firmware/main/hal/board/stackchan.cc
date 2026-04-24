@@ -185,7 +185,11 @@ public:
 
     void UpdateTouchPoint()
     {
-        ReadRegs(0x02, read_buffer_, 6);
+        uint8_t reg = 0x02;
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, read_buffer_, 6, 100);
+        if (err != ESP_OK) {
+            return;
+        }
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x   = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
         tp_.y   = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
