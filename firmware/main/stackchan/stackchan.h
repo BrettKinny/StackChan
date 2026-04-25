@@ -7,6 +7,7 @@
 #include "modifiable.h"
 #include "modifiers/modifiers.h"
 #include "json/json_helper.h"
+#include <cstring>
 #include <memory>
 
 namespace stackchan {
@@ -113,6 +114,24 @@ public:
     Modifier* getModifier(int id)
     {
         return _modifier_pool.get(id);
+    }
+    /**
+     * @brief Look up a modifier by its stable name() identifier.
+     *
+     * Linear scan over the pool. Intended for low-frequency use
+     * (e.g. pause/resume on state transitions), not per-frame work.
+     * Returns nullptr if no active modifier matches.
+     */
+    Modifier* getModifierByName(const char* name)
+    {
+        if (!name || !name[0]) return nullptr;
+        Modifier* found = nullptr;
+        _modifier_pool.forEach([&](Modifier* m, int /*id*/) {
+            if (!found && m && std::strcmp(m->name(), name) == 0) {
+                found = m;
+            }
+        });
+        return found;
     }
     bool removeModifier(int id)
     {

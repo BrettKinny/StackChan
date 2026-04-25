@@ -13,18 +13,23 @@ namespace stackchan {
 
 class FaceTrackingModifier : public Modifier {
 public:
-    FaceTrackingModifier(int idle_motion_modifier_id);
+    FaceTrackingModifier();
     void _update(Modifiable& stackchan) override;
 
 private:
     enum class State { Idle, Tracking, GracePeriod };
 
+    // IdleMotionModifier is resolved by stable name on each call rather
+    // than cached at construction. Caching the pool ID was unsound: the
+    // pool's free-list reuses slots, so if IdleMotionModifier was
+    // destroyed and recreated (e.g. round-tripping through a non-idle
+    // status), the ID held here would no longer point at the live
+    // instance and pause/resume would silently no-op.
     void pauseIdleMotion();
     void resumeIdleMotion();
     void setTrackingLed(Modifiable& stackchan, bool on);
 
     State _state        = State::Idle;
-    int _idle_motion_id = -1;
     float _smooth_x     = 0;
     float _smooth_y     = 0;
     float _alpha        = 0.3f;

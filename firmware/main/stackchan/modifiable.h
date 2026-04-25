@@ -41,6 +41,22 @@ public:
     virtual void _update(Modifiable& stackchan)
     {
     }
+
+    /**
+     * @brief Stable identifier for cross-modifier lookup.
+     *
+     * Pool IDs are reusable (free-list reuse), so caching one across
+     * a remove/recreate cycle gives a stale handle. Modifiers that
+     * other modifiers reach into (e.g. IdleMotionModifier paused by
+     * FaceTrackingModifier) override this to return a stable string
+     * name; lookups go through StackChan::getModifierByName().
+     *
+     * Empty string means "not addressable by name" (the default).
+     */
+    virtual const char* name() const
+    {
+        return "";
+    }
 };
 
 }  // namespace stackchan

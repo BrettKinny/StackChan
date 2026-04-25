@@ -19,10 +19,17 @@ namespace stackchan {
  */
 class IdleMotionModifier : public Modifier {
 public:
+    static constexpr const char* kName = "idle_motion";
+
     IdleMotionModifier(uint32_t interval_min = 4000, uint32_t interval_max = 8000)
         : _interval_min(interval_min), _interval_max(interval_max)
     {
         _next_tick = GetHAL().millis() + 1000;  // 启动 1 秒后开始第一次动作
+    }
+
+    const char* name() const override
+    {
+        return kName;
     }
 
     void pause()

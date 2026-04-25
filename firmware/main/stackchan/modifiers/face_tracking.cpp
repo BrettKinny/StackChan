@@ -10,10 +10,7 @@
 
 namespace stackchan {
 
-FaceTrackingModifier::FaceTrackingModifier(int idle_motion_modifier_id)
-    : _idle_motion_id(idle_motion_modifier_id)
-{
-}
+FaceTrackingModifier::FaceTrackingModifier() = default;
 
 void FaceTrackingModifier::_update(Modifiable& stackchan)
 {
@@ -80,14 +77,14 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
 void FaceTrackingModifier::pauseIdleMotion()
 {
     auto* idle = static_cast<IdleMotionModifier*>(
-        ::GetStackChan().getModifier(_idle_motion_id));
+        ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
     if (idle) idle->pause();
 }
 
 void FaceTrackingModifier::resumeIdleMotion()
 {
     auto* idle = static_cast<IdleMotionModifier*>(
-        ::GetStackChan().getModifier(_idle_motion_id));
+        ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
     if (idle) idle->resume();
 }
 

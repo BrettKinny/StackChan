@@ -630,8 +630,11 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // Enable face detection and tracking in idle
         FaceDetector::getInstance().setEnabled(true);
         if (face_tracking_modifier_id_ < 0) {
+            // FaceTrackingModifier resolves IdleMotionModifier by stable
+            // name on each pause/resume rather than caching a pool ID,
+            // so no handle is passed at construction.
             face_tracking_modifier_id_ = stackchan.addModifier(
-                std::make_unique<FaceTrackingModifier>(idle_motion_modifier_id_));
+                std::make_unique<FaceTrackingModifier>());
         }
         // Cyan right LED = face-detection mode active
         stackchan.rightNeonLight().setColor(0, 168, 168);
