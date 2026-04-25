@@ -1,5 +1,5 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..79742ca 100644
+index d69d43d..e2ea9ea 100644
 --- c/main/application.cc
 +++ w/main/application.cc
 @@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
@@ -64,7 +64,7 @@ index d69d43d..79742ca 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -1075,6 +1078,18 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1075,6 +1078,28 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -72,11 +72,21 @@ index d69d43d..79742ca 100644
 +// the actual SendEvent onto the main task so callers (face_tracking
 +// modifier on Core 0, sound localizer task) don't need to know about
 +// the protocol's threading model.
++//
++// Lazy-opens the WS audio channel so events from idle state (no
++// active conversation) still reach the server. xiaozhi WS lifecycle
++// is otherwise session-scoped — without this, perception events
++// queued at idle would silently fail (websocket_ == nullptr).
 +void Application::SendEvent(const std::string& name, const std::string& data_json) {
 +    Schedule([this, name, data_json]() {
-+        if (protocol_) {
-+            protocol_->SendEvent(name, data_json);
++        if (!protocol_) return;
++        if (!protocol_->IsAudioChannelOpened()) {
++            if (!protocol_->OpenAudioChannel()) {
++                ESP_LOGW(TAG, "SendEvent: failed to open WS for %s", name.c_str());
++                return;
++            }
 +        }
++        protocol_->SendEvent(name, data_json);
 +    });
 +}
 +
@@ -269,6 +279,53 @@ index 3692e0c..7bfbc5c 100644
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git c/main/audio/audio_service.cc w/main/audio/audio_service.cc
+index 350ac58..88d50e6 100644
+--- c/main/audio/audio_service.cc
++++ w/main/audio/audio_service.cc
+@@ -270,6 +270,12 @@ void AudioService::AudioInputTask() {
+             int samples = 160; // 10ms
+             std::vector<int16_t> data;
+             if (ReadAudioData(data, 16000, samples)) {
++                // Dotty: ambient sound localizer hook. Fires before mono
++                // downmix so subscribers see raw interleaved L/R frames.
++                // Cheap (zero-cost when no callback registered).
++                if (stereo_frame_callback_ && codec_->input_channels() == 2) {
++                    stereo_frame_callback_(data);
++                }
+                 if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
+                     wake_word_->Feed(data);
+                 }
+diff --git c/main/audio/audio_service.h w/main/audio/audio_service.h
+index 99db546..f90410b 100644
+--- c/main/audio/audio_service.h
++++ w/main/audio/audio_service.h
+@@ -127,6 +127,15 @@ public:
+ 
+     void SetCallbacks(AudioServiceCallbacks& callbacks);
+ 
++    // Dotty: ambient sound localization. Receives interleaved L/R PCM
++    // (int16, 16 kHz) frames before the wake-word + audio processor
++    // dispatch. Fires whenever audio is being read (i.e. wake-word is
++    // running, which is true at idle). Subscriber is responsible for
++    // its own thread-safety; the callback runs on the audio input task.
++    void OnStereoFrame(std::function<void(const std::vector<int16_t>&)> cb) {
++        stereo_frame_callback_ = std::move(cb);
++    }
++
+     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+     void PlaySound(const std::string_view& sound);
+@@ -174,6 +183,9 @@ private:
+     // For server AEC
+     std::deque<uint32_t> timestamp_queue_;
+ 
++    // Dotty: stereo frame callback for ambient sound localization.
++    std::function<void(const std::vector<int16_t>&)> stereo_frame_callback_;
++
+     bool wake_word_initialized_ = false;
+     bool audio_processor_initialized_ = false;
+     bool voice_detected_ = false;
 diff --git c/main/protocols/protocol.cc w/main/protocols/protocol.cc
 index 470cc91..53675f5 100644
 --- c/main/protocols/protocol.cc

@@ -16,6 +16,8 @@
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
 #include <stackchan/face/face_detector.h>
+#include <stackchan/sound_localizer.h>
+#include "application.h"
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 
@@ -621,6 +623,20 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
         // Cyan right LED = face-detection mode active
         stackchan.rightNeonLight().setColor(0, 168, 168);
+
+        // Phase 1.2: register the ambient sound localizer once. Its
+        // callback fires from the audio input task whenever stereo
+        // PCM is read (always, since wake-word is running at idle),
+        // emits sound_event(direction) on direction change.
+        static bool s_sound_localizer_registered = false;
+        if (!s_sound_localizer_registered) {
+            s_sound_localizer_registered = true;
+            static stackchan::SoundLocalizer s_sound_localizer;
+            Application::GetInstance().GetAudioService().OnStereoFrame(
+                [](const std::vector<int16_t>& lr) {
+                    s_sound_localizer.OnStereoFrame(lr);
+                });
+        }
     } else {
         // Stop face tracking and detection
         FaceDetector::getInstance().setEnabled(false);

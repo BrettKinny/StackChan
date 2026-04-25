@@ -30,7 +30,13 @@ private:
     float _alpha        = 0.3f;
     uint32_t _last_face_time = 0;
     uint32_t _grace_start    = 0;
-    uint32_t _grace_period_ms = 2000;
+    // Shortened from 2000 ms so face_lost fires quickly after the
+    // user leaves frame — the bridge's perception bus listens for
+    // that event and aborts any in-flight TTS so Dotty doesn't talk
+    // to empty space. 800 ms still gives ~2-3 frames at ~3 fps face
+    // detection to re-acquire during small head movements before
+    // flipping back to idle.
+    uint32_t _grace_period_ms = 800;
 };
 
 }  // namespace stackchan
