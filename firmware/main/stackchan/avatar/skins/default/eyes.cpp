@@ -99,6 +99,11 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
         }
     };
 
+    // Reset pupil size each call. Surprise overrides below; everything else
+    // gets the neutral default. Without this, Surprise's enlarged pupil leaks
+    // into whatever emotion follows.
+    setSize(0);
+
     switch (emotion) {
         case Emotion::Neutral:
             apply_style(100, 0);
@@ -110,7 +115,10 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
             apply_style(70, 450);
             break;
         case Emotion::Sad:
-            apply_style(70, -400);
+            // rotation is unsigned 0..3600 (tenths of a degree). 3200 ≈ -40°
+            // for a downturned droop on both eyes; the previous -400 clamped
+            // to 0 on the left eye and produced an asymmetric wink.
+            apply_style(40, 3200);
             break;
         case Emotion::Doubt:
             apply_style(75, 0);
@@ -119,10 +127,16 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
             apply_style(35, -50);
             break;
         case Emotion::Surprise:
-            apply_style(120, 0);
+            // weight is clamped 0..100, so the previous 120 was byte-identical
+            // to Neutral. Pair fully-open lids with an enlarged pupil instead.
+            setSize(80);
+            apply_style(100, 0);
             break;
         case Emotion::Love:
-            apply_style(72, 1550);
+            // Was a literal copy of Happy (72, 1550). Soft squint with smaller
+            // rotation so it reads "warm" not "grinning"; HeartDecorator
+            // overlay is added by the dispatch layer in stackchan_display.cc.
+            apply_style(60, 800);
             break;
         default:
             break;

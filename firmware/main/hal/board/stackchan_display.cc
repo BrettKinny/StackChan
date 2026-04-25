@@ -17,6 +17,7 @@
 #include <stackchan/stackchan.h>
 #include <stackchan/face/face_detector.h>
 #include <stackchan/sound_localizer.h>
+#include <stackchan/avatar/decorators/decorators.h>
 #include "application.h"
 #include <assets/lang_config.h>
 #include <hal/hal.h>
@@ -414,8 +415,19 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Surprise);
     } else if (strcmp(emotion, "loving") == 0) {
         avatar.setEmotion(Emotion::Love);
+        // Eye delta for Love is subtle (soft squint); the recognisable hearts
+        // are this decorator overlay. Same pattern as the touch-pet flow in
+        // head_pet.h. 4 s lifetime, 500 ms heart-spawn cadence.
+        avatar.removeDecorator(love_decorator_id_);
+        love_decorator_id_ = avatar.addDecorator(
+            std::make_unique<HeartDecorator>(lv_screen_active(), 4000, 500));
     } else {
+        // Brief magenta pip on the left ring is a visible signal that an
+        // unrecognised emotion arrived — otherwise this branch is silent and
+        // future emoji additions can regress invisibly. The LED gets
+        // overwritten by the next state-change; the warning log persists.
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
+        set_left_leds(40, 0, 40);
         avatar.setEmotion(Emotion::Neutral);
     }
 
