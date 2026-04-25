@@ -18,6 +18,7 @@ private:
     int thinking_modifier_id_           = -1;
     int idle_motion_modifier_id_        = -1;
     int idle_expression_modifier_id_    = -1;
+    int face_tracking_modifier_id_      = -1;
     int blink_modifier_id_              = -1;
     bool is_sleeping_                   = false;
     bool thinking_led_pending_          = false;

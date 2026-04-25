@@ -15,6 +15,7 @@
 #include <lvgl.h>
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/face/face_detector.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 
@@ -309,6 +310,8 @@ void StackChanAvatarDisplay::SetupUI()
 
     // GetHAL().startStackChanAutoUpdate(24);
 
+    FaceDetector::getInstance().start();
+
     ESP_LOGI(TAG, "Avatar created and started");
 }
 
@@ -364,6 +367,14 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setSpeech("Zzz…");
         is_sleeping_ = true;
         // avatar.mouth().setWeight(10);
+
+        // Stop face tracking
+        FaceDetector::getInstance().setEnabled(false);
+        if (face_tracking_modifier_id_ >= 0) {
+            stackchan.removeModifier(face_tracking_modifier_id_);
+            face_tracking_modifier_id_ = -1;
+        }
+        stackchan.rightNeonLight().setColor(0, 0, 0);
 
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -601,7 +612,26 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_motion_modifier_id_     = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
             idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
         }
+
+        // Enable face detection and tracking in idle
+        FaceDetector::getInstance().setEnabled(true);
+        if (face_tracking_modifier_id_ < 0) {
+            face_tracking_modifier_id_ = stackchan.addModifier(
+                std::make_unique<FaceTrackingModifier>(idle_motion_modifier_id_));
+        }
+        // Cyan right LED = face-detection mode active
+        stackchan.rightNeonLight().setColor(0, 168, 168);
     } else {
+        // Stop face tracking and detection
+        FaceDetector::getInstance().setEnabled(false);
+        if (face_tracking_modifier_id_ >= 0) {
+            stackchan.removeModifier(face_tracking_modifier_id_);
+            face_tracking_modifier_id_ = -1;
+        }
+        // Clear cyan mode-active LED. The left LED is owned by the chat-state
+        // set_left_leds() call earlier in this function, so don't touch it here.
+        stackchan.rightNeonLight().setColor(0, 0, 0);
+
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
         if (idle_motion_modifier_id_ >= 0) {
@@ -610,12 +640,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             stackchan.removeModifier(idle_expression_modifier_id_);
             idle_expression_modifier_id_ = -1;
         }
-
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
     }
 
     // Clear sleep state

@@ -16,6 +16,7 @@
 #include "board.h"
 #include "display.h"
 #include "stackchan_camera.h"
+#include <stackchan/face/camera_arbiter.h>
 #include "esp_jpeg_common.h"
 #include "jpg/image_to_jpeg.h"
 #include "jpg/jpeg_to_image.h"
@@ -402,6 +403,16 @@ bool StackChanCamera::Capture()
         return false;
     }
 
+    auto& arbiter = stackchan::CameraArbiter::getInstance();
+    if (!arbiter.acquireForCapture(2000)) {
+        ESP_LOGW(TAG, "Camera busy — face detector did not yield in time");
+        return false;
+    }
+    struct ArbiterGuard {
+        stackchan::CameraArbiter& a;
+        ~ArbiterGuard() { a.releaseForCapture(); }
+    } arbiter_guard{arbiter};
+
     // Play shutter sfx
     hal_bridge::app_play_sound(OGG_CAMERA_SHUTTER);
 
@@ -431,10 +442,10 @@ bool StackChanCamera::Capture()
             }
 
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
                      mmap_buffers_[buf.index].length, sensor_width_, sensor_height_);
 #else
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
                      mmap_buffers_[buf.index].length, frame_.width, frame_.height);
 #endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
             ESP_LOG_BUFFER_HEXDUMP(TAG, mmap_buffers_[buf.index].start, MIN(mmap_buffers_[buf.index].length, 256),
@@ -887,10 +898,10 @@ bool StackChanCamera::StreamCaptures()
             }
 
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, sensor_width = %d, sensor_height = %d",
                      mmap_buffers_[buf.index].length, sensor_width_, sensor_height_);
 #else
-            ESP_LOGW(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
+            ESP_LOGD(TAG, "mmap_buffers_[buf.index].length = %d, frame.width = %d, frame.height = %d",
                      mmap_buffers_[buf.index].length, frame_.width, frame_.height);
 #endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
             ESP_LOG_BUFFER_HEXDUMP(TAG, mmap_buffers_[buf.index].start, MIN(mmap_buffers_[buf.index].length, 256),
