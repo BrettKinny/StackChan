@@ -397,6 +397,10 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         }
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
+    } else if (strcmp(emotion, "surprised") == 0) {
+        avatar.setEmotion(Emotion::Surprise);
+    } else if (strcmp(emotion, "loving") == 0) {
+        avatar.setEmotion(Emotion::Love);
     } else {
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
         avatar.setEmotion(Emotion::Neutral);
