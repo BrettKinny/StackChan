@@ -17,6 +17,7 @@
 #include "display.h"
 #include "stackchan_camera.h"
 #include <stackchan/face/camera_arbiter.h>
+#include <stackchan/privacy/camera_peripheral_guard.h>
 #include "esp_jpeg_common.h"
 #include "jpg/image_to_jpeg.h"
 #include "jpg/jpeg_to_image.h"
@@ -412,6 +413,13 @@ bool StackChanCamera::Capture()
         stackchan::CameraArbiter& a;
         ~ArbiterGuard() { a.releaseForCapture(); }
     } arbiter_guard{arbiter};
+
+    // Layer 1 privacy LED. We are about to dequeue 3 frames from the V4L2
+    // driver — the camera is actively producing data for us. Light the
+    // indicator for the duration of the capture. See
+    // stackchan/privacy/PRIVACY_LEDS.md for why this currently tracks
+    // consumer activity rather than VIDIOC_STREAMON.
+    stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
 
     // Play shutter sfx
     hal_bridge::app_play_sound(OGG_CAMERA_SHUTTER);
@@ -871,6 +879,13 @@ bool StackChanCamera::StreamCaptures()
     if (!streaming_on_ || video_fd_ < 0) {
         return false;
     }
+
+    // Layer 1 privacy LED. One face-detect cycle is reading a frame; the
+    // guard lifetime is one StreamCaptures() call. With face_detector
+    // running at ~20 Hz this means the LED is solidly on whenever
+    // detection is enabled. See stackchan/privacy/PRIVACY_LEDS.md
+    // ("Deferred work") for the proper STREAMON-bound version.
+    stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
 
     {
         struct v4l2_buffer buf = {};

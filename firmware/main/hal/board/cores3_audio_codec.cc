@@ -204,7 +204,15 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
         }
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
         ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
+        // Layer 1 privacy LED. Construct the guard AFTER the codec is
+        // physically open: the LED is now hardware-tied to the ADC.
+        // Default to Local (mic on, no uplink); PrivacyLeds::update()
+        // promotes to Stream when AS_EVENT_AUDIO_PROCESSOR_RUNNING flips.
+        mic_privacy_guard_.emplace(stackchan::privacy::MicState::Local);
     } else {
+        // Drop the guard BEFORE closing the codec so the LED tracks the
+        // peripheral edge precisely.
+        mic_privacy_guard_.reset();
         ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
     }
     AudioCodec::EnableInput(enable);

@@ -5,6 +5,8 @@
 
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <optional>
+#include <stackchan/privacy/mic_peripheral_guard.h>
 
 class CoreS3AudioCodec : public AudioCodec {
 private:
@@ -17,6 +19,10 @@ private:
 
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
+
+    // Layer 1 privacy LED. The guard exists iff the codec input device
+    // is open (mic ADC active). See stackchan/privacy/PRIVACY_LEDS.md.
+    std::optional<stackchan::privacy::MicPeripheralGuard> mic_privacy_guard_;
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
 

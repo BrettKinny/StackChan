@@ -9,6 +9,7 @@
 #include <stackchan/stackchan.h>
 #include <stackchan/face/face_recognizer.h>
 #include <stackchan/face/parental_gate.h>
+#include <stackchan/privacy/privacy_leds.h>
 #include <apps/common/common.h>
 
 using namespace stackchan;
@@ -126,6 +127,33 @@ void Hal::xiaozhi_mcp_init()
             }
 
             return true;
+        });
+
+    mclog::tagInfo(_tag, "add robot.get_privacy_state tool");
+    mcp_server.AddTool(
+        "self.robot.get_privacy_state",
+        "READ-ONLY. Returns what the robot THINKS its privacy indicator LEDs are showing. "
+        "mic = 'off' | 'local' | 'streaming' (off = mic ADC closed; local = ADC on, only feeding "
+        "wake-word/VAD locally; streaming = ADC on AND opus frames being sent to the server). "
+        "camera = 'off' | 'streaming' (off = no consumer reading frames; streaming = face-detect "
+        "or take_photo is currently dequeuing camera frames). This tool CANNOT change the LEDs — "
+        "they are hardware-tied to the actual peripheral state.",
+        std::vector<Property>{},
+        [this](const PropertyList& properties) -> ReturnValue {
+            const char* mic_str = "off";
+            switch (privacy::PrivacyLeds::getInstance().micState()) {
+                case privacy::MicState::Off:    mic_str = "off"; break;
+                case privacy::MicState::Local:  mic_str = "local"; break;
+                case privacy::MicState::Stream: mic_str = "streaming"; break;
+            }
+            const char* cam_str = "off";
+            switch (privacy::PrivacyLeds::getInstance().cameraState()) {
+                case privacy::CameraState::Off:    cam_str = "off"; break;
+                case privacy::CameraState::Active: cam_str = "streaming"; break;
+            }
+            auto result = fmt::format(R"({{"mic": "{}", "camera": "{}"}})", mic_str, cam_str);
+            mclog::tagInfo(_tag, "get_privacy_state: {}", result);
+            return result;
         });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");

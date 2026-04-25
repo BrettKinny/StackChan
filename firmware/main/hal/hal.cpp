@@ -7,6 +7,7 @@
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <stackchan/privacy/privacy_leds.h>
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
@@ -155,6 +156,12 @@ static void _stackchan_update_task(void* param)
         LvglLockGuard lock;
 
         GetStackChan().update();
+
+        // Re-assert privacy indicator pixels AFTER the ring animations have
+        // run, so they visibly override the chat-state colours at the
+        // reserved indices (right-ring 6 = mic, 7 = camera). See
+        // stackchan/privacy/PRIVACY_LEDS.md for rationale.
+        stackchan::privacy::PrivacyLeds::getInstance().update();
 
         if (!is_xiaozhi_ready) {
             is_xiaozhi_ready = hal_bridge::is_xiaozhi_ready();
