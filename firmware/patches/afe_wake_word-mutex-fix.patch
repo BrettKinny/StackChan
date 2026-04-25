@@ -1,0 +1,63 @@
+diff --git i/main/audio/wake_words/afe_wake_word.cc w/main/audio/wake_words/afe_wake_word.cc
+index 8fc5fef..f0f3a42 100644
+--- i/main/audio/wake_words/afe_wake_word.cc
++++ w/main/audio/wake_words/afe_wake_word.cc
+@@ -162,6 +162,10 @@ void AfeWakeWord::AudioDetectionTask() {
+ 
+ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+     // store audio data to wake_word_pcm_
++    // Mutex-protected: the encoder task in EncodeWakeWordData() also iterates
++    // wake_word_pcm_; concurrent emplace/pop here vs. range-for there
++    // corrupts the deque and triggers tlsf_free double-free on dtor.
++    std::lock_guard<std::mutex> lock(wake_word_mutex_);
+     wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
+     // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
+     while (wake_word_pcm_.size() > 2000 / 30) {
+@@ -171,7 +175,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+ 
+ void AfeWakeWord::EncodeWakeWordData() {
+     const size_t stack_size = 4096 * 6;
+-    wake_word_opus_.clear();
++    {
++        // wake_word_opus_ is consumed by GetWakeWordOpus under the same
++        // mutex; clear here must be locked too or the consumer can race
++        // with the deque resetting and dereference invalid memory.
++        std::lock_guard<std::mutex> lock(wake_word_mutex_);
++        wake_word_opus_.clear();
++    }
+     if (wake_word_encode_task_stack_ == nullptr) {
+         wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
+         assert(wake_word_encode_task_stack_ != nullptr);
+@@ -208,8 +218,19 @@ void AfeWakeWord::EncodeWakeWordData() {
+             std::vector<int16_t> in_buffer;
+             esp_audio_enc_in_frame_t in = {};
+             esp_audio_enc_out_frame_t out = {};
+-            
+-            for (auto& pcm: this_->wake_word_pcm_) {
++
++            // Drain wake_word_pcm_ under the mutex into a local copy so we
++            // can iterate without racing StoreWakeWordData() (called from
++            // the audio detection callback). Iterating the live deque while
++            // the producer mutates it corrupts the structure and causes a
++            // tlsf_free double-free when vectors are later destroyed.
++            std::deque<std::vector<int16_t>> local_pcm;
++            {
++                std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
++                local_pcm.swap(this_->wake_word_pcm_);
++            }
++
++            for (auto& pcm: local_pcm) {
+                 if (in_buffer.empty()) {
+                     in_buffer = std::move(pcm);
+                 } else {
+@@ -238,7 +259,9 @@ void AfeWakeWord::EncodeWakeWordData() {
+                     in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
+                 }
+             }
+-            this_->wake_word_pcm_.clear();
++            // local_pcm goes out of scope at lambda end and frees its own
++            // vectors safely; no clear of the live deque needed (we already
++            // moved its contents out under the mutex above).
+             // Close encoder
+             esp_opus_enc_close(encoder_handle);
+             auto end_time = esp_timer_get_time();
