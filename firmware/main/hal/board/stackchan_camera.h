@@ -5,6 +5,7 @@
 #include <lvgl.h>
 #include <thread>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
@@ -44,6 +45,15 @@ private:
     std::string explain_token_;
     std::thread encoder_thread_;
 
+    // Phase B (face recognition) helpers. Multipart streamer factored out
+    // of Explain() so the face_enroll/face_recognize tools can reuse it.
+    std::string StreamJpegToBridge(
+        const std::string& url, const std::string& token,
+        const std::vector<std::pair<std::string, std::string>>& extra_fields);
+    std::string DeriveFaceUrl(const std::string& verb) const;
+    std::string SimpleBridgeRequest(const std::string& method, const std::string& url,
+                                    const std::string& content_type, const std::string& body);
+
 public:
     StackChanCamera(const esp_video_init_config_t& config);
     ~StackChanCamera();
@@ -56,6 +66,13 @@ public:
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;
     virtual std::string Explain(const std::string& question);
+
+    // Layer 4 face recognition (server-side). All four go to the bridge
+    // at the URL derived from explain_url_ — see DeriveFaceUrl().
+    virtual std::string EnrollFace(const std::string& name);
+    virtual std::string RecognizeFace();
+    virtual std::string ForgetFace(const std::string& name);
+    virtual std::string ListFaces();
 
     const uint8_t* GetFrameData()
     {

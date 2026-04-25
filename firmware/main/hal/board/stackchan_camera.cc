@@ -1052,18 +1052,25 @@ bool StackChanCamera::SetVFlip(bool enabled)
  */
 std::string StackChanCamera::Explain(const std::string& question)
 {
-    if (explain_url_.empty()) {
-        throw std::runtime_error("Image explain URL or token is not set");
+    return StreamJpegToBridge(explain_url_, explain_token_,
+                              {{"question", question}});
+}
+
+std::string StackChanCamera::StreamJpegToBridge(
+    const std::string& url, const std::string& token,
+    const std::vector<std::pair<std::string, std::string>>& extra_fields)
+{
+    if (url.empty()) {
+        throw std::runtime_error("Bridge URL is not set");
     }
 
-    // 创建局部的 JPEG 队列, 40 entries is about to store 512 * 40 = 20480 bytes of JPEG data
     QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
     if (jpeg_queue == nullptr) {
         ESP_LOGE(TAG, "Failed to create JPEG queue");
         throw std::runtime_error("Failed to create JPEG queue");
     }
 
-    // We spawn a thread to encode the image to JPEG using optimized encoder (cost about 500ms and 8KB SRAM)
+    // Encode JPEG on a worker thread (~500ms, ~8KB SRAM).
     encoder_thread_ = std::thread([this, jpeg_queue]() {
         uint16_t w             = frame_.width ? frame_.width : 320;
         uint16_t h             = frame_.height ? frame_.height : 240;
@@ -1097,20 +1104,17 @@ std::string StackChanCamera::Explain(const std::string& question)
 
     auto network = Board::GetInstance().GetNetwork();
     auto http    = network->CreateHttp(3);
-    // 构造multipart/form-data请求体
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
-    // 配置HTTP客户端，使用分块传输编码
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
-    if (!explain_token_.empty()) {
-        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    if (!token.empty()) {
+        http->SetHeader("Authorization", "Bearer " + token);
     }
     http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     http->SetHeader("Transfer-Encoding", "chunked");
-    if (!http->Open("POST", explain_url_)) {
-        ESP_LOGE(TAG, "Failed to connect to explain URL");
-        // Clear the queue
+    if (!http->Open("POST", url)) {
+        ESP_LOGE(TAG, "Failed to connect to bridge URL: %s", url.c_str());
         encoder_thread_.join();
         JpegChunk chunk;
         while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
@@ -1121,20 +1125,19 @@ std::string StackChanCamera::Explain(const std::string& question)
             }
         }
         vQueueDelete(jpeg_queue);
-        throw std::runtime_error("Failed to connect to explain URL");
+        throw std::runtime_error("Failed to connect to bridge URL");
     }
 
-    {
-        // 第一块：question字段
-        std::string question_field;
-        question_field += "--" + boundary + "\r\n";
-        question_field += "Content-Disposition: form-data; name=\"question\"\r\n";
-        question_field += "\r\n";
-        question_field += question + "\r\n";
-        http->Write(question_field.c_str(), question_field.size());
+    // Form fields (e.g. {"question", text} or {"name", text}) emitted before the file part.
+    for (const auto& field : extra_fields) {
+        std::string body;
+        body += "--" + boundary + "\r\n";
+        body += "Content-Disposition: form-data; name=\"" + field.first + "\"\r\n";
+        body += "\r\n";
+        body += field.second + "\r\n";
+        http->Write(body.c_str(), body.size());
     }
     {
-        // 第二块：文件字段头部
         std::string file_header;
         file_header += "--" + boundary + "\r\n";
         file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n";
@@ -1143,7 +1146,6 @@ std::string StackChanCamera::Explain(const std::string& question)
         http->Write(file_header.c_str(), file_header.size());
     }
 
-    // 第三块：JPEG数据
     size_t total_sent   = 0;
     bool saw_terminator = false;
     while (true) {
@@ -1154,15 +1156,13 @@ std::string StackChanCamera::Explain(const std::string& question)
         }
         if (chunk.data == nullptr) {
             saw_terminator = true;
-            break;  // The last chunk
+            break;
         }
         http->Write((const char*)chunk.data, chunk.len);
         total_sent += chunk.len;
         heap_caps_free(chunk.data);
     }
-    // Wait for the encoder thread to finish
     encoder_thread_.join();
-    // 清理队列
     vQueueDelete(jpeg_queue);
 
     if (!saw_terminator || total_sent == 0) {
@@ -1171,25 +1171,125 @@ std::string StackChanCamera::Explain(const std::string& question)
     }
 
     {
-        // 第四块：multipart尾部
         std::string multipart_footer;
         multipart_footer += "\r\n--" + boundary + "--\r\n";
         http->Write(multipart_footer.c_str(), multipart_footer.size());
     }
-    // 结束块
     http->Write("", 0);
 
     if (http->GetStatusCode() != 200) {
-        ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());
-        throw std::runtime_error("Failed to upload photo");
+        ESP_LOGE(TAG, "Bridge upload failed, status=%d url=%s",
+                 http->GetStatusCode(), url.c_str());
+        throw std::runtime_error("Failed to upload to bridge");
     }
 
     std::string result = http->ReadAll();
     http->Close();
 
-    // Get remain task stack size
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
-    ESP_LOGI(TAG, "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
-             (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
+    ESP_LOGI(TAG, "StreamJpegToBridge url=%s frame=%d compressed=%d stack=%d\n%s",
+             url.c_str(), (int)frame_.len, (int)total_sent,
+             (int)remain_stack_size, result.c_str());
     return result;
+}
+
+std::string StackChanCamera::DeriveFaceUrl(const std::string& verb) const
+{
+    // explain_url_ is configured once at startup as ".../api/vision/explain".
+    // Swap the suffix to derive ".../api/face/<verb>".
+    static const std::string kSuffix = "/api/vision/explain";
+    if (explain_url_.size() < kSuffix.size() ||
+        explain_url_.compare(explain_url_.size() - kSuffix.size(),
+                             kSuffix.size(), kSuffix) != 0) {
+        ESP_LOGW(TAG, "explain_url_ does not end in %s — cannot derive face URL",
+                 kSuffix.c_str());
+        return std::string();
+    }
+    return explain_url_.substr(0, explain_url_.size() - kSuffix.size())
+           + "/api/face/" + verb;
+}
+
+std::string StackChanCamera::SimpleBridgeRequest(
+    const std::string& method, const std::string& url,
+    const std::string& content_type, const std::string& body)
+{
+    if (url.empty()) {
+        throw std::runtime_error("Bridge URL is not set");
+    }
+    auto network = Board::GetInstance().GetNetwork();
+    auto http    = network->CreateHttp(3);
+
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    if (!explain_token_.empty()) {
+        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    }
+    if (!content_type.empty()) {
+        http->SetHeader("Content-Type", content_type);
+    }
+    if (!body.empty()) {
+        std::string body_copy = body;
+        http->SetContent(std::move(body_copy));
+    }
+    if (!http->Open(method, url)) {
+        ESP_LOGE(TAG, "Failed to open bridge URL: %s", url.c_str());
+        throw std::runtime_error("Failed to open bridge URL");
+    }
+
+    int status         = http->GetStatusCode();
+    std::string result = http->ReadAll();
+    http->Close();
+
+    if (status != 200) {
+        ESP_LOGE(TAG, "Bridge request failed, status=%d url=%s body=%s",
+                 status, url.c_str(), result.c_str());
+        throw std::runtime_error("Bridge request failed");
+    }
+    ESP_LOGI(TAG, "SimpleBridgeRequest %s %s -> %s",
+             method.c_str(), url.c_str(), result.c_str());
+    return result;
+}
+
+std::string StackChanCamera::EnrollFace(const std::string& name)
+{
+    std::string url = DeriveFaceUrl("enroll");
+    if (url.empty()) {
+        throw std::runtime_error("face URL not configured");
+    }
+    return StreamJpegToBridge(url, explain_token_, {{"name", name}});
+}
+
+std::string StackChanCamera::RecognizeFace()
+{
+    std::string url = DeriveFaceUrl("recognize");
+    if (url.empty()) {
+        throw std::runtime_error("face URL not configured");
+    }
+    return StreamJpegToBridge(url, explain_token_, {});
+}
+
+std::string StackChanCamera::ForgetFace(const std::string& name)
+{
+    std::string url = DeriveFaceUrl("forget");
+    if (url.empty()) {
+        throw std::runtime_error("face URL not configured");
+    }
+    // JSON body matches bridge contract: {"name": "..."} or {"name": "*"} for wipe-all.
+    // Names validated upstream; here only escape " and \.
+    std::string escaped;
+    for (char c : name) {
+        if (c == '"' || c == '\\') escaped.push_back('\\');
+        escaped.push_back(c);
+    }
+    std::string body = "{\"name\":\"" + escaped + "\"}";
+    return SimpleBridgeRequest("POST", url, "application/json", body);
+}
+
+std::string StackChanCamera::ListFaces()
+{
+    std::string url = DeriveFaceUrl("list");
+    if (url.empty()) {
+        throw std::runtime_error("face URL not configured");
+    }
+    return SimpleBridgeRequest("GET", url, "", "");
 }
