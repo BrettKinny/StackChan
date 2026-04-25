@@ -7,6 +7,8 @@
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/face/face_recognizer.h>
+#include <stackchan/face/parental_gate.h>
 #include <apps/common/common.h>
 
 using namespace stackchan;
@@ -180,4 +182,143 @@ void Hal::xiaozhi_mcp_init()
                            tools::stop_reminder(id);
                            return true;
                        });
+
+    // -----------------------------------------------------------------
+    // Layer 4: face-recognition MCP tools.
+    // See firmware/main/stackchan/face/PRIVACY.md for the retention model.
+    // Enroll / forget require the parental gate (PIN or long-press); list
+    // is public; unlock is the credentialed entry point.
+    // -----------------------------------------------------------------
+
+    mclog::tagInfo(_tag, "add robot.face_unlock tool");
+    mcp_server.AddTool(
+        "self.robot.face_unlock",
+        "Open the parental gate so face_enroll/face_forget can run. "
+        "method='pin' validates secret against the device PIN; "
+        "method='long_press' validates that the head-pet long-press flag was "
+        "armed (real long-press detector wiring is a follow-up). "
+        "Unlock is single-shot and expires after 30 seconds.",
+        PropertyList({Property("method", kPropertyTypeString, std::string("pin")),
+                      Property("secret", kPropertyTypeString, std::string(""))}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            std::string method = properties["method"].value<std::string>();
+            std::string secret = properties["secret"].value<std::string>();
+
+            // Don't log `secret` — it's the PIN. `method` is fine.
+            mclog::tagInfo(_tag, "face_unlock: method={}", method);
+
+            bool ok = false;
+            if (method == "pin") {
+                ok = ParentalGate::tryUnlockByPIN(secret);
+            } else if (method == "long_press") {
+                ok = ParentalGate::tryUnlockByLongPress();
+            } else {
+                mclog::tagWarn(_tag, "face_unlock: unknown method '{}'", method);
+                return std::string(R"({"ok":false,"reason":"unknown_method"})");
+            }
+            if (!ok) {
+                return std::string(R"({"ok":false,"reason":"unlock_failed"})");
+            }
+            return std::string(R"({"ok":true})");
+        });
+
+    mclog::tagInfo(_tag, "add robot.face_list tool");
+    mcp_server.AddTool(
+        "self.robot.face_list",
+        "Returns the names of faces currently enrolled on-device. "
+        "Public — does NOT require the parental gate. Biometric data "
+        "(embeddings) never leaves the device, only the names.",
+        std::vector<Property>{},
+        [this](const PropertyList& properties) -> ReturnValue {
+            auto names = FaceRecognizer::getInstance().enrolledNames();
+            std::string out = "{\"names\":[";
+            for (size_t i = 0; i < names.size(); i++) {
+                // JSON-escape per name. Names are validated at enrollment
+                // (no control chars) so we only worry about " and \.
+                out += "\"";
+                for (char c : names[i]) {
+                    if (c == '"' || c == '\\') out.push_back('\\');
+                    out.push_back(c);
+                }
+                out += "\"";
+                if (i + 1 < names.size()) out += ",";
+            }
+            out += fmt::format(R"(],"count":{},"capacity":{}}})",
+                               names.size(), FaceRecognizer::kMaxEnrolled);
+            mclog::tagInfo(_tag, "face_list: {}", out);
+            return out;
+        });
+
+    mclog::tagInfo(_tag, "add robot.face_enroll tool");
+    mcp_server.AddTool(
+        "self.robot.face_enroll",
+        "Enroll the currently-detected face under `name`. REQUIRES the "
+        "parental gate to be unlocked first (see self.robot.face_unlock). "
+        "Captures embedding from the next detector frame and persists to "
+        "NVS. Capacity 10 enrolled faces. Embedding stays on-device.",
+        PropertyList({Property("name", kPropertyTypeString, std::string(""))}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            std::string name = properties["name"].value<std::string>();
+            mclog::tagInfo(_tag, "face_enroll: name={}", name);
+
+            if (name.empty()) {
+                return std::string(R"({"ok":false,"reason":"empty_name"})");
+            }
+            if (!ParentalGate::isUnlocked()) {
+                mclog::tagWarn(_tag, "face_enroll: parental gate required");
+                return std::string(R"({"ok":false,"reason":"parental_gate_required"})");
+            }
+
+            // SCAFFOLD: real flow captures the next detector crop and
+            // computes an embedding. The recognizer's enroll() in the
+            // scaffold persists a placeholder embedding regardless;
+            // the bridge can already exercise enrollment slot semantics.
+            FaceImage stub_img{};
+            bool ok = FaceRecognizer::getInstance().enroll(
+                name, stub_img, /*parental_gate_passed=*/true);
+
+            // Single-shot semantics: consume the unlock whether or not
+            // the enroll succeeded. Reduces "user runs the same enroll
+            // twice on a typo" attack surface.
+            ParentalGate::consume();
+
+            if (!ok) {
+                return std::string(R"({"ok":false,"reason":"enroll_failed"})");
+            }
+            return std::string(R"({"ok":true})");
+        });
+
+    mclog::tagInfo(_tag, "add robot.face_forget tool");
+    mcp_server.AddTool(
+        "self.robot.face_forget",
+        "Delete the enrollment for `name` from on-device storage. REQUIRES "
+        "the parental gate to be unlocked first (see self.robot.face_unlock). "
+        "Pass name='*' to wipe ALL enrolled faces.",
+        PropertyList({Property("name", kPropertyTypeString, std::string(""))}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            std::string name = properties["name"].value<std::string>();
+            mclog::tagInfo(_tag, "face_forget: name={}", name);
+
+            if (name.empty()) {
+                return std::string(R"({"ok":false,"reason":"empty_name"})");
+            }
+            if (!ParentalGate::isUnlocked()) {
+                mclog::tagWarn(_tag, "face_forget: parental gate required");
+                return std::string(R"({"ok":false,"reason":"parental_gate_required"})");
+            }
+
+            bool ok = false;
+            if (name == "*") {
+                ok = FaceRecognizer::getInstance().forgetAll();
+            } else {
+                ok = FaceRecognizer::getInstance().forget(name);
+            }
+
+            ParentalGate::consume();
+
+            if (!ok) {
+                return std::string(R"({"ok":false,"reason":"forget_failed"})");
+            }
+            return std::string(R"({"ok":true})");
+        });
 }
