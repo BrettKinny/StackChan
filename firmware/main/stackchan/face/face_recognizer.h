@@ -10,6 +10,17 @@
 // stored in NVS namespace `face_recog`. NEVER egresses biometric data; see
 // firmware/main/stackchan/face/PRIVACY.md for the retention model.
 //
+// DORMANT (2026-04-25)
+// --------------------
+// Compute moved server-side per the Phase B plan
+// (~/.claude/plans/i-want-to-design-gentle-charm.md). The bridge owns
+// embedding + match via dlib in /root/.zeroclaw/faces.sqlite. The MCP
+// tools that previously called into this class (self.robot.face_*) were
+// removed; the new server-side tools are self.camera.face_* in
+// firmware/main/hal/hal_mcp.cpp. This scaffold is retained for a future
+// on-device fallback (LAN-down mode, or a privacy-LED-gated path) and is
+// not currently linked into any tool.
+//
 // SCAFFOLD STATE
 // --------------
 // This is the structural scaffold. The real ESP-DL `face_recognition.so`

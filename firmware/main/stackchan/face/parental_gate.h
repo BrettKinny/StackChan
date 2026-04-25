@@ -14,6 +14,14 @@
 // again. This keeps a dropped MCP session, an overheard PIN, or a stale shell
 // from being able to enroll/forget on its own.
 //
+// DORMANT (2026-04-25)
+// --------------------
+// The Phase B plan defers the parental gate for the v1 family-only deployment;
+// the new server-side face MCP tools (self.camera.face_*) call the bridge
+// directly without an unlock step. This scaffold is retained so the gate can
+// be re-enabled before any wider deployment (tracked in tasks.md). It is not
+// currently referenced by any MCP tool.
+//
 // SCAFFOLD NOTE
 // -------------
 // PIN check uses a hardcoded constexpr placeholder. Production must:
