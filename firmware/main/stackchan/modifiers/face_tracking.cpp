@@ -8,9 +8,41 @@
 #include "idle_motion.h"
 #include "application.h"  // Phase 1.2: server-bound perception events
 
+#include <cmath>
+
 namespace stackchan {
 
-FaceTrackingModifier::FaceTrackingModifier() = default;
+// ---------------------------------------------------------------------------
+// Tracking tuning knobs — keep all magic numbers here so reverts are one-line.
+//
+// kEmaAlpha           : EMA smoothing factor for face center.
+//                       Previous value 0.3f produced visibly laggy tracking
+//                       at ~3 fps detection. 0.5f reacts faster while still
+//                       filtering single-frame jitter. Range [0.0..1.0],
+//                       higher = more responsive, less smoothing.
+//
+// kLookAtSpeed        : Servo move speed (deg/sec) handed to
+//                       Motion::lookAtNormalized(). Previous 350 was slow
+//                       enough to lag a moving face; 500 keeps up better.
+//                       The motion layer clamps so values aren't unbounded.
+//
+// kDeadbandFrac       : Minimum fractional change in normalized x/y before
+//                       we re-issue a servo command. Frame-normalized coords
+//                       are in [-1..1], so a "frame-width" delta = 2.0; this
+//                       constant is fraction of that span. 0.06f ≈ 3% of
+//                       frame width on each axis. Below this, micro-jitter
+//                       from the detector chatters the gearbox for no gain.
+// ---------------------------------------------------------------------------
+static constexpr float kEmaAlpha     = 0.5f;   // was 0.3f
+static constexpr int   kLookAtSpeed  = 500;    // was 350
+static constexpr float kDeadbandFrac = 0.06f;  // was effectively 0 (no deadband)
+
+FaceTrackingModifier::FaceTrackingModifier()
+{
+    // Pull EMA alpha from the constexpr at top of file so reverts only
+    // touch one location.
+    _alpha = kEmaAlpha;
+}
 
 void FaceTrackingModifier::_update(Modifiable& stackchan)
 {
@@ -29,6 +61,9 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 _state = State::Tracking;
                 _smooth_x = raw_x;
                 _smooth_y = raw_y;
+                // Force first command to fire regardless of deadband when
+                // we (re-)acquire a face after an idle gap.
+                _last_cmd_valid = false;
                 pauseIdleMotion();
                 setTrackingLed(stackchan, true);
                 Application::GetInstance().SendEvent("face_detected", "{}");
@@ -49,7 +84,7 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
             if (detected) {
                 _smooth_x += _alpha * (raw_x - _smooth_x);
                 _smooth_y += _alpha * (raw_y - _smooth_y);
-                stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, 350);
+                _maybeIssueLookAt(stackchan);
                 _last_face_time = now;
             } else {
                 _state = State::GracePeriod;
@@ -62,10 +97,11 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 _state = State::Tracking;
                 _smooth_x += _alpha * (raw_x - _smooth_x);
                 _smooth_y += _alpha * (raw_y - _smooth_y);
-                stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, 350);
+                _maybeIssueLookAt(stackchan);
                 _last_face_time = now;
             } else if (now - _grace_start > _grace_period_ms) {
                 _state = State::Idle;
+                _last_cmd_valid = false;
                 resumeIdleMotion();
                 setTrackingLed(stackchan, false);
                 Application::GetInstance().SendEvent("face_lost", "{}");
@@ -86,6 +122,25 @@ void FaceTrackingModifier::resumeIdleMotion()
     auto* idle = static_cast<IdleMotionModifier*>(
         ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
     if (idle) idle->resume();
+}
+
+void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
+{
+    // Deadband: skip the servo command if the smoothed target moved less
+    // than kDeadbandFrac of the (full) normalized span on each axis since
+    // the last command. Prevents detector jitter (~1-2 px bbox shimmer)
+    // from chattering the gearbox while the user holds still.
+    if (_last_cmd_valid) {
+        float dx = std::fabs(_smooth_x - _last_cmd_x);
+        float dy = std::fabs(_smooth_y - _last_cmd_y);
+        if (dx < kDeadbandFrac && dy < kDeadbandFrac) {
+            return;  // inside deadband — keep current servo target
+        }
+    }
+    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, kLookAtSpeed);
+    _last_cmd_x = _smooth_x;
+    _last_cmd_y = _smooth_y;
+    _last_cmd_valid = true;
 }
 
 void FaceTrackingModifier::setTrackingLed(Modifiable& stackchan, bool on)
