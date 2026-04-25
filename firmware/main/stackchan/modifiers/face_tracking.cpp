@@ -35,6 +35,16 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 pauseIdleMotion();
                 setTrackingLed(stackchan, true);
                 Application::GetInstance().SendEvent("face_detected", "{}");
+                // Open the mic on face acquisition — same path as a
+                // wake-word detection. The device transitions to
+                // Listening (auto-stop / VAD-driven), so a short
+                // window of silence returns to idle naturally; if the
+                // user speaks within the window, the normal chat
+                // flow takes over. The bridge's inject-text greeting
+                // then interrupts with "Hi!" and listening resumes
+                // post-TTS. Tag with "face" so server logs can tell
+                // this trigger from a real wake-word detection.
+                Application::GetInstance().WakeWordInvoke("face");
             }
             break;
 
