@@ -92,6 +92,40 @@ void Hal::xiaozhi_mcp_init()
             return true;
         });
 
+    mclog::tagInfo(_tag, "add robot.set_led_multi tool");
+    mcp_server.AddTool(
+        "self.robot.set_led_multi",
+        "Set ONE pixel of the robot's 12-LED ring directly. Index 0-5 = left ring, 6-11 = right ring. "
+        "Bypasses the ring colour animation, so the chosen pixel holds its colour while the rest of the "
+        "ring keeps animating (used for hybrid status indicators, e.g. smart-mode). r/g/b 0-255.",
+        PropertyList({Property("index", kPropertyTypeInteger, 0, 0, 11),
+                      Property("red", kPropertyTypeInteger, 0, 0, 255),
+                      Property("green", kPropertyTypeInteger, 0, 0, 255),
+                      Property("blue", kPropertyTypeInteger, 0, 0, 255)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            int index = properties["index"].value<int>();
+            int r     = properties["red"].value<int>();
+            int g     = properties["green"].value<int>();
+            int b     = properties["blue"].value<int>();
+
+            if (index < 0 || index > 11) {
+                mclog::tagWarn(_tag, "set_led_multi: index out of range: {}", index);
+                return false;
+            }
+
+            mclog::tagInfo(_tag, "set_led_multi: index={}, r={}, g={}, b={}", index, r, g, b);
+
+            LvglLockGuard lock;
+
+            if (index < 6) {
+                GetStackChan().leftNeonLight().setColorAt(static_cast<uint8_t>(index), r, g, b);
+            } else {
+                GetStackChan().rightNeonLight().setColorAt(static_cast<uint8_t>(index - 6), r, g, b);
+            }
+
+            return true;
+        });
+
     mclog::tagInfo(_tag, "add robot.create_reminder tool");
     mcp_server.AddTool("self.robot.create_reminder",
                        "Create a reminder. Duration is in seconds. Message is what to say when time is up. Set repeat "

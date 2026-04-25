@@ -78,6 +78,18 @@ void NeonLight::setDuration(float durationSec)
     _color_anim.begin();
 }
 
+void NeonLight::setColorAt(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (index >= _led_count) {
+        return;
+    }
+    if (!_is_inited) {
+        init();
+    }
+    set_rgb_color_impl(index, r, g, b);
+    refresh_rgb_impl();
+}
+
 void LeftNeonLight::set_rgb_color_impl(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
 {
     GetHAL().setRgbColor(index, r, g, b);
