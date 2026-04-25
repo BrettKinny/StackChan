@@ -293,8 +293,8 @@ void FaceDetector::processFrame()
 
                 // JSON-escape the identity so a future name with a quote
                 // can't break the payload. Names are length-bounded and
-                // control-char-rejected at enrollment time, so " and \
-                // are the only realistic problems here.
+                // control-char-rejected at enrollment time, so quote and
+                // backslash are the only realistic problems here.
                 std::string esc;
                 esc.reserve(identity.size() + 2);
                 for (char c : identity) {
