@@ -16,8 +16,18 @@ public:
 
     bool tryAcquireForDetection()
     {
-        if (_capture_pending.load(std::memory_order_acquire)) return false;
-        return xSemaphoreTake(_mutex, 0) == pdTRUE;
+        // Take the mutex first, then re-check _capture_pending while holding
+        // it. Checking the flag before the take is a TOCTOU race: Capture()
+        // can set the flag between our check and the take, after which we'd
+        // hold the mutex and force Capture() to wait up to its 2 s timeout.
+        // With the check inside the mutex region, if Capture() has already
+        // signaled intent we yield immediately and let it proceed.
+        if (xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
+        if (_capture_pending.load(std::memory_order_acquire)) {
+            xSemaphoreGive(_mutex);
+            return false;
+        }
+        return true;
     }
 
     void releaseForDetection()
