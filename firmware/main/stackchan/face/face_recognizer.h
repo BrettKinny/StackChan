@@ -6,12 +6,28 @@
 //
 // FaceRecognizer — Layer 4 of the Dotty/StackChan stack.
 //
+// SERVER-SIDE COMPUTE (current runtime path, 2026-04-25)
+// ------------------------------------------------------
+// This on-device scaffold is DORMANT. Layer 4 compute moved to the RPi
+// bridge (`zeroclaw-bridge/bridge/face_recognizer.py`, dlib-backed) per
+// the design in `~/.claude/plans/i-want-to-design-gentle-charm.md`.
+// Reason: the project follows a self-hosted philosophy — biometric data
+// stays on the LAN, but the firmware doesn't need to do the compute.
+// The new privacy contract is documented in PRIVACY.md (the doc has
+// been rewritten to reflect this; the on-device fields below are kept
+// only for the forward-compat option of moving compute back here).
+//
+// The MCP tools `self.camera.face_enroll/recognize/forget/list`
+// stream a JPEG to the bridge instead of running this class. The
+// firmware-side handler is in `firmware/main/hal/hal_mcp.cpp` (Phase B
+// of the plan). This class is NOT instantiated by the MCP path.
+//
 // On-device face recognition (Option A from tasks.md). Embeddings + names
 // stored in NVS namespace `face_recog`. NEVER egresses biometric data; see
 // firmware/main/stackchan/face/PRIVACY.md for the retention model.
 //
-// SCAFFOLD STATE
-// --------------
+// SCAFFOLD STATE (on-device fallback option)
+// ------------------------------------------
 // This is the structural scaffold. The real ESP-DL `face_recognition.so`
 // hookup is a follow-up commit — the relevant integration points are
 // marked `// TODO(esp-dl):` inside the .cpp. For now:

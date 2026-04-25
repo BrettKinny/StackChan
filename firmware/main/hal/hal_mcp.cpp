@@ -11,6 +11,7 @@
 #include <stackchan/face/parental_gate.h>
 #include <stackchan/privacy/privacy_leds.h>
 #include <apps/common/common.h>
+#include <hal/board/stackchan_camera.h>
 
 using namespace stackchan;
 
@@ -358,5 +359,117 @@ void Hal::xiaozhi_mcp_init()
                 return std::string(R"({"ok":false,"reason":"forget_failed"})");
             }
             return std::string(R"({"ok":true})");
+        });
+
+    // ---------------------------------------------------------------------
+    // Layer 4 — face recognition (server-side compute on the bridge)
+    // ---------------------------------------------------------------------
+    // The four `self.camera.face_*` tools below stream / call the bridge's
+    // /api/face/* endpoints. Compute (face detection + embedding + nearest-
+    // neighbour match) lives in `bridge/face_recognizer.py` on the RPi —
+    // see `firmware/main/stackchan/face/PRIVACY.md` for the contract.
+    //
+    // These coexist with the dormant on-device `self.robot.face_*` tools
+    // above; the LLM should prefer `self.camera.face_*` for any flow that
+    // touches the camera. Single-direction migration: the `self.robot.*`
+    // tools will be removed when the on-device fallback option is dropped.
+
+    mclog::tagInfo(_tag, "add camera.face_enroll tool");
+    mcp_server.AddTool(
+        "self.camera.face_enroll",
+        "Capture the current frame and send it to the bridge to enroll "
+        "the face under `name`. Compute happens server-side; biometric "
+        "data stays on the LAN. Caller is responsible for prompting the "
+        "user to look at the camera before invoking this tool.",
+        PropertyList({Property("name", kPropertyTypeString, std::string(""))}),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string name = properties["name"].value<std::string>();
+            mclog::tagInfo(_tag, "camera.face_enroll: name={}", name);
+            if (name.empty()) {
+                return std::string(R"({"ok":false,"reason":"empty_name"})");
+            }
+            auto camera = (StackChanCamera*)Board::GetInstance().GetCamera();
+            if (camera == nullptr) {
+                return std::string(R"({"ok":false,"reason":"no_camera"})");
+            }
+            try {
+                return camera->EnrollFace(name);
+            } catch (const std::exception& e) {
+                mclog::tagError(_tag, "camera.face_enroll failed: {}",
+                                e.what());
+                return std::string(R"({"ok":false,"reason":"transport_error"})");
+            }
+        });
+
+    mclog::tagInfo(_tag, "add camera.face_recognize tool");
+    mcp_server.AddTool(
+        "self.camera.face_recognize",
+        "Capture the current frame and ask the bridge to identify the "
+        "largest face. Returns {name, confidence}; name='unknown' when "
+        "no face matches above the threshold or when no face is in "
+        "frame. Throttle externally — embedding inference is ~500 ms on "
+        "the bridge.",
+        std::vector<Property>{},
+        [](const PropertyList& properties) -> ReturnValue {
+            mclog::tagInfo(_tag, "camera.face_recognize");
+            auto camera = (StackChanCamera*)Board::GetInstance().GetCamera();
+            if (camera == nullptr) {
+                return std::string(R"({"ok":false,"reason":"no_camera"})");
+            }
+            try {
+                return camera->RecognizeFace();
+            } catch (const std::exception& e) {
+                mclog::tagError(_tag, "camera.face_recognize failed: {}",
+                                e.what());
+                return std::string(R"({"ok":false,"reason":"transport_error"})");
+            }
+        });
+
+    mclog::tagInfo(_tag, "add camera.face_forget tool");
+    mcp_server.AddTool(
+        "self.camera.face_forget",
+        "Ask the bridge to delete the enrollment for `name`. Pass "
+        "name='*' to wipe all enrolled identities. Does NOT capture a "
+        "frame. Immediate; no soft-delete.",
+        PropertyList({Property("name", kPropertyTypeString, std::string(""))}),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string name = properties["name"].value<std::string>();
+            mclog::tagInfo(_tag, "camera.face_forget: name={}", name);
+            if (name.empty()) {
+                return std::string(R"({"ok":false,"reason":"empty_name"})");
+            }
+            auto camera = (StackChanCamera*)Board::GetInstance().GetCamera();
+            if (camera == nullptr) {
+                return std::string(R"({"ok":false,"reason":"no_camera"})");
+            }
+            try {
+                return camera->ForgetFace(name);
+            } catch (const std::exception& e) {
+                mclog::tagError(_tag, "camera.face_forget failed: {}",
+                                e.what());
+                return std::string(R"({"ok":false,"reason":"transport_error"})");
+            }
+        });
+
+    mclog::tagInfo(_tag, "add camera.face_list tool");
+    mcp_server.AddTool(
+        "self.camera.face_list",
+        "List enrolled face identities by name. Returns {ok, names, "
+        "count, capacity}. Read-only; no frame capture, no parental "
+        "gate.",
+        std::vector<Property>{},
+        [](const PropertyList& properties) -> ReturnValue {
+            mclog::tagInfo(_tag, "camera.face_list");
+            auto camera = (StackChanCamera*)Board::GetInstance().GetCamera();
+            if (camera == nullptr) {
+                return std::string(R"({"ok":false,"reason":"no_camera"})");
+            }
+            try {
+                return camera->ListFaces();
+            } catch (const std::exception& e) {
+                mclog::tagError(_tag, "camera.face_list failed: {}",
+                                e.what());
+                return std::string(R"({"ok":false,"reason":"transport_error"})");
+            }
         });
 }

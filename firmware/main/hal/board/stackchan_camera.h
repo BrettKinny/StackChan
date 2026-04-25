@@ -3,8 +3,10 @@
 
 #ifndef CONFIG_IDF_TARGET_ESP32
 #include <lvgl.h>
+#include <string>
 #include <thread>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
@@ -44,6 +46,17 @@ private:
     std::string explain_token_;
     std::thread encoder_thread_;
 
+    // Internal helper used by Explain() and the face-recognition methods.
+    // Encodes the current frame to JPEG (worker thread), then streams it
+    // as multipart/form-data to `url` with each (name,value) pair in
+    // `extra_fields` emitted as a leading form field. Throws on transport
+    // failure. Same wire format as Explain() — only the URL and the
+    // extra fields differ between callers.
+    std::string StreamJpegMultipart(
+        const std::string& url,
+        const std::string& token,
+        const std::vector<std::pair<std::string, std::string>>& extra_fields);
+
 public:
     StackChanCamera(const esp_video_init_config_t& config);
     ~StackChanCamera();
@@ -56,6 +69,20 @@ public:
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;
     virtual std::string Explain(const std::string& question);
+
+    // Layer 4 face recognition — server-side compute on the bridge.
+    // Each method captures (or omits) a JPEG, calls the corresponding
+    // bridge endpoint, and returns the JSON response body. The face
+    // service URL is derived from `explain_url_` by substituting
+    // `/api/vision/explain` → `/api/face/<endpoint>`. SetExplainUrl
+    // therefore implicitly configures these too — no new setter needed.
+    //
+    // Throws std::runtime_error on transport failure; does NOT throw
+    // for application-level errors (those surface in the JSON body).
+    std::string EnrollFace(const std::string& name);
+    std::string RecognizeFace();
+    std::string ForgetFace(const std::string& name);
+    std::string ListFaces();
 
     const uint8_t* GetFrameData()
     {

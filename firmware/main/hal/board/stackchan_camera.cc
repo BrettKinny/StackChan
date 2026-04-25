@@ -1050,10 +1050,22 @@ bool StackChanCamera::SetVFlip(bool enabled)
  * @note 函数会等待之前的编码线程完成后再开始新的处理
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
-std::string StackChanCamera::Explain(const std::string& question)
+// Internal helper: encode the current camera frame to JPEG (on a worker
+// thread) and stream it as multipart/form-data to `url`, with each
+// (name,value) pair in `extra_fields` emitted as a preceding form field.
+// The image is always emitted last under the field name "file".
+//
+// Returns the response body on HTTP 200; throws std::runtime_error on
+// any transport failure (connection / encoder / non-200 status). Used
+// by Explain() and the face-recognition methods below — same wire
+// format, different endpoints / fields.
+std::string StackChanCamera::StreamJpegMultipart(
+    const std::string& url,
+    const std::string& token,
+    const std::vector<std::pair<std::string, std::string>>& extra_fields)
 {
-    if (explain_url_.empty()) {
-        throw std::runtime_error("Image explain URL or token is not set");
+    if (url.empty()) {
+        throw std::runtime_error("StreamJpegMultipart: url is empty");
     }
 
     // 创建局部的 JPEG 队列, 40 entries is about to store 512 * 40 = 20480 bytes of JPEG data
@@ -1103,13 +1115,13 @@ std::string StackChanCamera::Explain(const std::string& question)
     // 配置HTTP客户端，使用分块传输编码
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
-    if (!explain_token_.empty()) {
-        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    if (!token.empty()) {
+        http->SetHeader("Authorization", "Bearer " + token);
     }
     http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     http->SetHeader("Transfer-Encoding", "chunked");
-    if (!http->Open("POST", explain_url_)) {
-        ESP_LOGE(TAG, "Failed to connect to explain URL");
+    if (!http->Open("POST", url)) {
+        ESP_LOGE(TAG, "Failed to connect to %s", url.c_str());
         // Clear the queue
         encoder_thread_.join();
         JpegChunk chunk;
@@ -1121,20 +1133,20 @@ std::string StackChanCamera::Explain(const std::string& question)
             }
         }
         vQueueDelete(jpeg_queue);
-        throw std::runtime_error("Failed to connect to explain URL");
+        throw std::runtime_error("Failed to connect to multipart URL");
     }
 
-    {
-        // 第一块：question字段
-        std::string question_field;
-        question_field += "--" + boundary + "\r\n";
-        question_field += "Content-Disposition: form-data; name=\"question\"\r\n";
-        question_field += "\r\n";
-        question_field += question + "\r\n";
-        http->Write(question_field.c_str(), question_field.size());
+    // 第一组：所有 extra form fields（任意数量）
+    for (const auto& kv : extra_fields) {
+        std::string field;
+        field += "--" + boundary + "\r\n";
+        field += "Content-Disposition: form-data; name=\"" + kv.first + "\"\r\n";
+        field += "\r\n";
+        field += kv.second + "\r\n";
+        http->Write(field.c_str(), field.size());
     }
     {
-        // 第二块：文件字段头部
+        // 文件字段头部
         std::string file_header;
         file_header += "--" + boundary + "\r\n";
         file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n";
@@ -1143,7 +1155,7 @@ std::string StackChanCamera::Explain(const std::string& question)
         http->Write(file_header.c_str(), file_header.size());
     }
 
-    // 第三块：JPEG数据
+    // JPEG数据
     size_t total_sent   = 0;
     bool saw_terminator = false;
     while (true) {
@@ -1171,7 +1183,7 @@ std::string StackChanCamera::Explain(const std::string& question)
     }
 
     {
-        // 第四块：multipart尾部
+        // multipart尾部
         std::string multipart_footer;
         multipart_footer += "\r\n--" + boundary + "--\r\n";
         http->Write(multipart_footer.c_str(), multipart_footer.size());
@@ -1180,16 +1192,140 @@ std::string StackChanCamera::Explain(const std::string& question)
     http->Write("", 0);
 
     if (http->GetStatusCode() != 200) {
-        ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());
-        throw std::runtime_error("Failed to upload photo");
+        ESP_LOGE(TAG, "Multipart upload failed, status code: %d, url: %s",
+                 http->GetStatusCode(), url.c_str());
+        throw std::runtime_error("Multipart upload failed");
     }
 
     std::string result = http->ReadAll();
     http->Close();
 
-    // Get remain task stack size
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
-    ESP_LOGI(TAG, "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
-             (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
+    ESP_LOGI(TAG, "StreamJpegMultipart url=%s frame=%d compressed=%d stack=%d\n%s",
+             url.c_str(), (int)frame_.len, (int)total_sent,
+             (int)remain_stack_size, result.c_str());
+    return result;
+}
+
+std::string StackChanCamera::Explain(const std::string& question)
+{
+    if (explain_url_.empty()) {
+        throw std::runtime_error("Image explain URL or token is not set");
+    }
+    return StreamJpegMultipart(
+        explain_url_, explain_token_,
+        {{"question", question}});
+}
+
+// ---------------------------------------------------------------------
+// Layer 4 — face recognition (server-side compute on the bridge)
+// ---------------------------------------------------------------------
+//
+// The face-service endpoints live on the same bridge that hosts
+// /api/vision/explain. Rather than introduce a separate URL setter
+// (and the boot-time wiring to populate it), we derive the face URLs
+// from `explain_url_` by substituting the path segment.
+
+namespace {
+// Replace "/api/vision/explain" with "/api/face/<endpoint>" anywhere
+// in `explain_url`. Returns "" if the expected segment isn't found —
+// callers throw on empty so a misconfigured URL surfaces clearly.
+std::string DeriveFaceUrl(const std::string& explain_url,
+                          const std::string& endpoint)
+{
+    static const std::string kVisionPath = "/api/vision/explain";
+    auto pos = explain_url.find(kVisionPath);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    return explain_url.substr(0, pos) + "/api/face/" + endpoint
+         + explain_url.substr(pos + kVisionPath.size());
+}
+}  // namespace
+
+std::string StackChanCamera::EnrollFace(const std::string& name)
+{
+    std::string url = DeriveFaceUrl(explain_url_, "enroll");
+    if (url.empty()) {
+        throw std::runtime_error(
+            "EnrollFace: cannot derive face URL from explain_url");
+    }
+    return StreamJpegMultipart(url, explain_token_, {{"name", name}});
+}
+
+std::string StackChanCamera::RecognizeFace()
+{
+    std::string url = DeriveFaceUrl(explain_url_, "recognize");
+    if (url.empty()) {
+        throw std::runtime_error(
+            "RecognizeFace: cannot derive face URL from explain_url");
+    }
+    return StreamJpegMultipart(url, explain_token_, {});
+}
+
+std::string StackChanCamera::ForgetFace(const std::string& name)
+{
+    std::string url = DeriveFaceUrl(explain_url_, "forget");
+    if (url.empty()) {
+        throw std::runtime_error(
+            "ForgetFace: cannot derive face URL from explain_url");
+    }
+    auto network = Board::GetInstance().GetNetwork();
+    auto http    = network->CreateHttp(3);
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    if (!explain_token_.empty()) {
+        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    }
+    http->SetHeader("Content-Type", "application/json");
+    // Tiny JSON; no escape concerns for validated `name` values, but
+    // be defensive about quotes anyway.
+    std::string safe_name;
+    safe_name.reserve(name.size() + 4);
+    for (char c : name) {
+        if (c == '"' || c == '\\') safe_name.push_back('\\');
+        safe_name.push_back(c);
+    }
+    std::string payload = std::string("{\"name\":\"") + safe_name + "\"}";
+    http->SetContent(std::move(payload));
+    if (!http->Open("POST", url)) {
+        throw std::runtime_error("ForgetFace: failed to connect");
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "ForgetFace: status=%d url=%s",
+                 http->GetStatusCode(), url.c_str());
+        throw std::runtime_error("ForgetFace: non-200 status");
+    }
+    std::string result = http->ReadAll();
+    http->Close();
+    ESP_LOGI(TAG, "ForgetFace: %s", result.c_str());
+    return result;
+}
+
+std::string StackChanCamera::ListFaces()
+{
+    std::string url = DeriveFaceUrl(explain_url_, "list");
+    if (url.empty()) {
+        throw std::runtime_error(
+            "ListFaces: cannot derive face URL from explain_url");
+    }
+    auto network = Board::GetInstance().GetNetwork();
+    auto http    = network->CreateHttp(3);
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    if (!explain_token_.empty()) {
+        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    }
+    if (!http->Open("GET", url)) {
+        throw std::runtime_error("ListFaces: failed to connect");
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "ListFaces: status=%d url=%s",
+                 http->GetStatusCode(), url.c_str());
+        throw std::runtime_error("ListFaces: non-200 status");
+    }
+    std::string result = http->ReadAll();
+    http->Close();
+    ESP_LOGI(TAG, "ListFaces: %s", result.c_str());
     return result;
 }
