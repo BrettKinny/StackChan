@@ -102,7 +102,7 @@ The privacy LED currently tracks the **consumer**, not the V4L2 stream-on flag �
 - **PY32 IO expander failed to init.** `Hal::setRgbColor` is a no-op (`hal_io_expander.cpp:70-76`). The privacy LED is dark even while the peripheral may be active. There is no hardware fallback. We log loudly during init in `hal_io_expander_init()`.
 - **A future patch enables the codec / camera without going through the guard.** The LED stays Off. This is a code-review defence only. To harden: make `AudioCodec::EnableInput` private and force callers through `MicPeripheralGuard`. Same for the camera. Not done in this scaffold.
 - **Stack-chan ring animation overpaints the privacy pixel.** Mitigated by `PrivacyLeds::update()` running once per tick AFTER the ring animation.
-- **An MCP tool calls `self.robot.set_led_multi` with index 6 or 7.** That bypass is currently possible — `set_led_multi` does not blacklist the privacy indices. **Future hardening:** reject indices 6 and 7 in the `set_led_multi` lambda. Not done in this scaffold.
+- **An MCP tool calls `self.robot.set_led_multi` with index 6 or 7.** **Closed.** The `set_led_multi` handler in `hal_mcp.cpp` now rejects `index == privacy::kMicLedIndex || index == privacy::kCameraLedIndex` with a warn log and a `false` return, before any `setColorAt` call. The server is no longer trusted with the privacy pixels — they belong to the peripheral-enable code path (`MicPeripheralGuard` / `CameraPeripheralGuard`) only.
 
 ---
 

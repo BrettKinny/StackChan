@@ -116,6 +116,16 @@ void Hal::xiaozhi_mcp_init()
                 return false;
             }
 
+            // These indices are hardware-guaranteed privacy indicators (mic/camera state).
+            // The MCP server-side LLM is NOT trusted with overwriting them. PrivacyLeds::update()
+            // re-asserts every tick (~20ms), so a write here would only cause a transient flicker,
+            // but we reject outright to keep the privacy pixels owned by the peripheral-enable
+            // code path (mic_peripheral_guard / camera_peripheral_guard) alone.
+            if (index == privacy::kMicLedIndex || index == privacy::kCameraLedIndex) {
+                mclog::tagWarn(_tag, "set_led_multi: index reserved for privacy LED: {}", index);
+                return false;
+            }
+
             mclog::tagInfo(_tag, "set_led_multi: index={}, r={}, g={}, b={}", index, r, g, b);
 
             LvglLockGuard lock;
