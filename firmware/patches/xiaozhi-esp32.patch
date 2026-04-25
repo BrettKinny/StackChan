@@ -1,7 +1,7 @@
-diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3b6f07e 100644
---- a/main/application.cc
-+++ b/main/application.cc
+diff --git c/main/application.cc w/main/application.cc
+index d69d43d..79742ca 100644
+--- c/main/application.cc
++++ w/main/application.cc
 @@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
  }
  
@@ -22,17 +22,6 @@ index d69d43d..3b6f07e 100644
 -        digit_sound{'8', Lang::Sounds::OGG_8},
 -        digit_sound{'9', Lang::Sounds::OGG_9}
 -    }};
--
--    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
--    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
--
--    for (const auto& digit : code) {
--        auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
--            [digit](const digit_sound& ds) { return ds.digit == digit; });
--        if (it != digit_sounds.end()) {
--            audio_service_.PlaySound(it->sound);
--        }
--    }
 +    // struct digit_sound {
 +    //     char digit;
 +    //     const std::string_view& sound;
@@ -49,10 +38,19 @@ index d69d43d..3b6f07e 100644
 +    //     digit_sound{'8', Lang::Sounds::OGG_8},
 +    //     digit_sound{'9', Lang::Sounds::OGG_9}
 +    // }};
-+
+ 
+-    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
+-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
 +    // // This sentence uses 9KB of SRAM, so we need to wait for it to finish
 +    // Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
-+
+ 
+-    for (const auto& digit : code) {
+-        auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
+-            [digit](const digit_sound& ds) { return ds.digit == digit; });
+-        if (it != digit_sounds.end()) {
+-            audio_service_.PlaySound(it->sound);
+-        }
+-    }
 +    // for (const auto& digit : code) {
 +    //     auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
 +    //         [digit](const digit_sound& ds) { return ds.digit == digit; });
@@ -66,10 +64,43 @@ index d69d43d..3b6f07e 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-diff --git a/main/assets.cc b/main/assets.cc
+@@ -1075,6 +1078,18 @@ void Application::SendMcpMessage(const std::string& payload) {
+     });
+ }
+ 
++// Dotty: ambient perception event emit. Thread-safe — Schedule pushes
++// the actual SendEvent onto the main task so callers (face_tracking
++// modifier on Core 0, sound localizer task) don't need to know about
++// the protocol's threading model.
++void Application::SendEvent(const std::string& name, const std::string& data_json) {
++    Schedule([this, name, data_json]() {
++        if (protocol_) {
++            protocol_->SendEvent(name, data_json);
++        }
++    });
++}
++
+ void Application::SetAecMode(AecMode mode) {
+     aec_mode_ = mode;
+     Schedule([this]() {
+diff --git c/main/application.h w/main/application.h
+index 7ca7af4..ecac53a 100644
+--- c/main/application.h
++++ w/main/application.h
+@@ -108,6 +108,9 @@ public:
+     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+     bool CanEnterSleepMode();
+     void SendMcpMessage(const std::string& payload);
++    // Dotty: ambient perception event emit (face_detected / face_lost / sound_event).
++    // Thread-safe (Schedule wrapped); fire-and-forget.
++    void SendEvent(const std::string& name, const std::string& data_json);
+     void SetAecMode(AecMode mode);
+     AecMode GetAecMode() const { return aec_mode_; }
+     void PlaySound(const std::string_view& sound);
+diff --git c/main/assets.cc w/main/assets.cc
 index ad61944..6b84daf 100644
---- a/main/assets.cc
-+++ b/main/assets.cc
+--- c/main/assets.cc
++++ w/main/assets.cc
 @@ -3,8 +3,8 @@
  #include "display.h"
  #include "application.h"
@@ -87,11 +118,16 @@ index ad61944..6b84daf 100644
  
 -bool Assets::EmoteStrategy::InitializePartition(Assets* assets) {
 -    assets->partition_valid_ = false;
--
++// bool Assets::EmoteStrategy::InitializePartition(Assets* assets) {
++//     assets->partition_valid_ = false;
+ 
 -    if (!Assets::FindPartition(assets)) {
 -        return false;
 -    }
--
++//     if (!Assets::FindPartition(assets)) {
++//         return false;
++//     }
+ 
 -    esp_err_t ret = ESP_ERR_INVALID_STATE;
 -    auto display = Board::GetInstance().GetDisplay();
 -    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
@@ -112,52 +148,6 @@ index ad61944..6b84daf 100644
 -    assets->partition_valid_ = ((ret == ESP_OK) ? true : false);
 -    return assets->partition_valid_;
 -}
--
--void Assets::EmoteStrategy::UnApplyPartition(Assets* assets) {
--    auto display = Board::GetInstance().GetDisplay();
--    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
--    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
--        emote_unmount_assets(emote_display->GetEmoteHandle());
--    }
--    (void)assets; // Unused parameter
--}
--
--bool Assets::EmoteStrategy::GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) {
--    auto display = Board::GetInstance().GetDisplay();
--    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
--    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
--        const uint8_t* data = nullptr;
--        size_t data_size = 0;
--        if (ESP_OK == emote_get_asset_data_by_name(emote_display->GetEmoteHandle(), name.c_str(), &data, &data_size)) {
--            ptr = const_cast<void*>(static_cast<const void*>(data));
--            size = data_size;
--            return true;
--        }
--        ESP_LOGE(TAG, "Failed to get asset data by name: %s", name.c_str());
--        return false;
--    }
--    (void)assets; // Unused parameter
--    return false;
--}
--
--bool Assets::EmoteStrategy::Apply(Assets* assets) {
--    Assets::LoadSrmodelsFromIndex(assets);
--
--    auto display = Board::GetInstance().GetDisplay();
--    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
--
--    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
--        emote_load_assets(emote_display->GetEmoteHandle());
--    }
--    return true;
--}
-+// bool Assets::EmoteStrategy::InitializePartition(Assets* assets) {
-+//     assets->partition_valid_ = false;
-+
-+//     if (!Assets::FindPartition(assets)) {
-+//         return false;
-+//     }
-+
 +//     esp_err_t ret = ESP_ERR_INVALID_STATE;
 +//     auto display = Board::GetInstance().GetDisplay();
 +//     auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
@@ -178,7 +168,15 @@ index ad61944..6b84daf 100644
 +//     assets->partition_valid_ = ((ret == ESP_OK) ? true : false);
 +//     return assets->partition_valid_;
 +// }
-+
+ 
+-void Assets::EmoteStrategy::UnApplyPartition(Assets* assets) {
+-    auto display = Board::GetInstance().GetDisplay();
+-    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
+-    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
+-        emote_unmount_assets(emote_display->GetEmoteHandle());
+-    }
+-    (void)assets; // Unused parameter
+-}
 +// void Assets::EmoteStrategy::UnApplyPartition(Assets* assets) {
 +//     auto display = Board::GetInstance().GetDisplay();
 +//     auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
@@ -187,7 +185,24 @@ index ad61944..6b84daf 100644
 +//     }
 +//     (void)assets; // Unused parameter
 +// }
-+
+ 
+-bool Assets::EmoteStrategy::GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) {
+-    auto display = Board::GetInstance().GetDisplay();
+-    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
+-    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
+-        const uint8_t* data = nullptr;
+-        size_t data_size = 0;
+-        if (ESP_OK == emote_get_asset_data_by_name(emote_display->GetEmoteHandle(), name.c_str(), &data, &data_size)) {
+-            ptr = const_cast<void*>(static_cast<const void*>(data));
+-            size = data_size;
+-            return true;
+-        }
+-        ESP_LOGE(TAG, "Failed to get asset data by name: %s", name.c_str());
+-        return false;
+-    }
+-    (void)assets; // Unused parameter
+-    return false;
+-}
 +// bool Assets::EmoteStrategy::GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) {
 +//     auto display = Board::GetInstance().GetDisplay();
 +//     auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
@@ -205,13 +220,22 @@ index ad61944..6b84daf 100644
 +//     (void)assets; // Unused parameter
 +//     return false;
 +// }
-+
+ 
+-bool Assets::EmoteStrategy::Apply(Assets* assets) {
+-    Assets::LoadSrmodelsFromIndex(assets);
 +// bool Assets::EmoteStrategy::Apply(Assets* assets) {
 +//     Assets::LoadSrmodelsFromIndex(assets);
-+
+ 
+-    auto display = Board::GetInstance().GetDisplay();
+-    auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
 +//     auto display = Board::GetInstance().GetDisplay();
 +//     auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
-+
+ 
+-    if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
+-        emote_load_assets(emote_display->GetEmoteHandle());
+-    }
+-    return true;
+-}
 +//     if (emote_display && emote_display->GetEmoteHandle() != nullptr) {
 +//         emote_load_assets(emote_display->GetEmoteHandle());
 +//     }
@@ -220,10 +244,10 @@ index ad61944..6b84daf 100644
  
  bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
      ESP_LOGI(TAG, "Downloading new version of assets from %s", url.c_str());
-diff --git a/main/assets.h b/main/assets.h
+diff --git c/main/assets.h w/main/assets.h
 index 3692e0c..7bfbc5c 100644
---- a/main/assets.h
-+++ b/main/assets.h
+--- c/main/assets.h
++++ w/main/assets.h
 @@ -68,13 +68,13 @@ private:
          bool checksum_valid_ = false;
      };
@@ -245,3 +269,36 @@ index 3692e0c..7bfbc5c 100644
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git c/main/protocols/protocol.cc w/main/protocols/protocol.cc
+index 470cc91..53675f5 100644
+--- c/main/protocols/protocol.cc
++++ w/main/protocols/protocol.cc
+@@ -78,6 +78,14 @@ void Protocol::SendMcpMessage(const std::string& payload) {
+     SendText(message);
+ }
+ 
++// Dotty: ambient perception event frame.
++void Protocol::SendEvent(const std::string& name, const std::string& data_json) {
++    std::string message = "{\"session_id\":\"" + session_id_ +
++                          "\",\"type\":\"event\",\"name\":\"" + name +
++                          "\",\"data\":" + data_json + "}";
++    SendText(message);
++}
++
+ bool Protocol::IsTimeout() const {
+     const int kTimeoutSeconds = 120;
+     auto now = std::chrono::steady_clock::now();
+diff --git c/main/protocols/protocol.h w/main/protocols/protocol.h
+index 28ef604..510e91f 100644
+--- c/main/protocols/protocol.h
++++ w/main/protocols/protocol.h
+@@ -73,6 +73,9 @@ public:
+     virtual void SendStopListening();
+     virtual void SendAbortSpeaking(AbortReason reason);
+     virtual void SendMcpMessage(const std::string& message);
++    // Dotty: ambient perception event frame.
++    // Emits {"type":"event","name":<name>,"data":<data_json>} server-bound.
++    virtual void SendEvent(const std::string& name, const std::string& data_json);
+ 
+ protected:
+     std::function<void(const cJSON* root)> on_incoming_json_;

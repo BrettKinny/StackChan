@@ -6,6 +6,7 @@
 #include "face_tracking.h"
 #include "../stackchan.h"
 #include "idle_motion.h"
+#include "application.h"  // Phase 1.2: server-bound perception events
 
 namespace stackchan {
 
@@ -33,6 +34,7 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 _smooth_y = raw_y;
                 pauseIdleMotion();
                 setTrackingLed(stackchan, true);
+                Application::GetInstance().SendEvent("face_detected", "{}");
             }
             break;
 
@@ -59,6 +61,7 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 _state = State::Idle;
                 resumeIdleMotion();
                 setTrackingLed(stackchan, false);
+                Application::GetInstance().SendEvent("face_lost", "{}");
             }
             break;
     }
