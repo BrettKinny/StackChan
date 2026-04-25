@@ -26,14 +26,28 @@ void SoundLocalizer::OnStereoFrame(const std::vector<int16_t>& interleaved_lr)
     // as 'left'), slot 1 = MIC2 ('right'). If real-world testing shows
     // the polarity reversed for the CoreS3's physical mic layout, swap
     // the indices below.
+    //
+    // Each sample is run through a per-channel 1st-order high-pass at
+    // ~300 Hz before energy accumulation, so HVAC / fan / aircon rumble
+    // (which lives mostly <200 Hz) doesn't trip the energy gate. Speech
+    // formants (500-3000 Hz) pass through cleanly; that's plenty of
+    // signal for direction localisation, which only needs the L/R
+    // intensity ratio anyway.
     int64_t left_energy  = 0;
     int64_t right_energy = 0;
     const size_t n = interleaved_lr.size() & ~size_t(1);  // even count
     for (size_t i = 0; i + 1 < n; i += 2) {
-        const int32_t l = interleaved_lr[i];
-        const int32_t r = interleaved_lr[i + 1];
-        left_energy  += int64_t(l) * l;
-        right_energy += int64_t(r) * r;
+        const float l_in = float(interleaved_lr[i]);
+        const float r_in = float(interleaved_lr[i + 1]);
+
+        // y[n] = α (y[n-1] + x[n] - x[n-1])  — 1st-order HPF
+        const float l_hp = kHpAlpha * (_hp_l_prev_y + l_in - _hp_l_prev_x);
+        const float r_hp = kHpAlpha * (_hp_r_prev_y + r_in - _hp_r_prev_x);
+        _hp_l_prev_x = l_in;  _hp_l_prev_y = l_hp;
+        _hp_r_prev_x = r_in;  _hp_r_prev_y = r_hp;
+
+        left_energy  += int64_t(l_hp) * int64_t(l_hp);
+        right_energy += int64_t(r_hp) * int64_t(r_hp);
     }
     const int64_t total = left_energy + right_energy;
 
