@@ -11,10 +11,42 @@
 
 namespace stackchan {
 
+// Phase 3 — chat-state profile pushed by stackchan_display.cc::SetStatus
+// on each chat-state transition. Drives EMA smoothing, idle-overlay
+// cadence/amplitude, and whether face acquisition fires WakeWordInvoke.
+struct ChatProfile {
+    float    alpha;                  // EMA smoothing factor for face center
+    uint32_t overlay_min_ms;         // tracking-overlay cadence (idle_motion)
+    uint32_t overlay_max_ms;
+    float    amplitude_scale;        // scale on overlay deltas (1.0 = Phase 2 default)
+    bool     allow_wake_word_invoke; // only true for the IDLE profile
+};
+
+// Per-chat-state profile table. `inline constexpr` so the definitions are
+// visible across translation units (stackchan_display.cc picks the right
+// one to push, face_tracking.cpp uses kChatProfileIdle as the constructor
+// default). amplitude_scale is relative to Phase 2's halved tracking-
+// overlay range (±75°/±40°). allow_wake_word_invoke is IDLE-only so a
+// face re-acquired mid-chat doesn't stomp on the running session.
+inline constexpr ChatProfile kChatProfileIdle      { 0.7f, 12000, 24000, 1.0f, true  };
+inline constexpr ChatProfile kChatProfileListening { 0.8f,  8000, 12000, 1.0f, false };
+inline constexpr ChatProfile kChatProfileSpeaking  { 0.4f, 30000, 45000, 0.5f, false };
+
 class FaceTrackingModifier : public Modifier {
 public:
+    static constexpr const char* kName = "face_tracking";
+
     FaceTrackingModifier();
     void _update(Modifiable& stackchan) override;
+    const char* name() const override { return kName; }
+
+    // Phase 3 — push a new chat profile. Updates _alpha + _profile, hands
+    // the overlay tunables through to IdleMotionModifier, and stores the
+    // wake-word gate. Safe to call from the main task on chat-state
+    // transitions; reads on Core 1 (the modifier loop) are non-atomic but
+    // tearing here is benign (worst case: one tick uses a partially-
+    // updated profile, self-corrects on the next tick).
+    void setChatProfile(const ChatProfile& profile);
 
 private:
     enum class State { Idle, Tracking, GracePeriod };
@@ -57,6 +89,12 @@ private:
     // detection to re-acquire during small head movements before
     // flipping back to idle.
     uint32_t _grace_period_ms = 800;
+
+    // Phase 3 — active chat profile. Initialised from kChatProfileIdle
+    // (face_tracking.cpp) in the constructor; updated by setChatProfile.
+    // _alpha is also a member because the EMA expression in _update reads
+    // it inline; setChatProfile keeps both _alpha and _profile.alpha in sync.
+    ChatProfile _profile;
 
     // Phase 0 instrumentation — counters reset every kPhase0WindowMs.
     // See probes/face-tracking-naturalness.md for the bench procedure.

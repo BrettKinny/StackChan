@@ -19,6 +19,10 @@ static const char* TAG = "face_tracking";
 // Phase 0 instrumentation window (see probes/face-tracking-naturalness.md).
 static constexpr uint32_t kPhase0WindowMs = 5000;
 
+// Phase 3 chat profiles (kChatProfileIdle / Listening / Speaking) live in
+// face_tracking.h as inline constexpr so stackchan_display.cc::SetStatus
+// can pick the right one and pass it via setChatProfile().
+
 // ---------------------------------------------------------------------------
 // Tracking tuning knobs — keep all magic numbers here so reverts are one-line.
 //
@@ -55,9 +59,28 @@ static constexpr float kDeadbandFrac = 0.02f;  // history: 0.06f → 0.02f (Phas
 
 FaceTrackingModifier::FaceTrackingModifier()
 {
-    // Pull EMA alpha from the constexpr at top of file so reverts only
-    // touch one location.
-    _alpha = kEmaAlpha;
+    // Phase 3 — initial profile is IDLE (matches the state at construction;
+    // stackchan_display.cc::SetStatus pushes the live profile on first call).
+    // _alpha tracks _profile.alpha for the inline EMA expression in _update.
+    _profile = kChatProfileIdle;
+    _alpha   = _profile.alpha;
+    // Phase 1 constexpr kEmaAlpha is now the IDLE-profile alpha; if the
+    // profile API ever has to be backed out, restore _alpha = kEmaAlpha here.
+}
+
+void FaceTrackingModifier::setChatProfile(const ChatProfile& profile)
+{
+    _profile = profile;
+    _alpha   = profile.alpha;
+    // Push overlay tunables into IdleMotionModifier — kept in sync so the
+    // overlay cadence/amplitude tracks the chat state without face_tracking
+    // having to reach into idle_motion's internals on every tick.
+    auto* idle = static_cast<IdleMotionModifier*>(
+        ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
+    if (idle) {
+        idle->setIntervalRange(profile.overlay_min_ms, profile.overlay_max_ms);
+        idle->setAmplitudeScale(profile.amplitude_scale);
+    }
 }
 
 void FaceTrackingModifier::_update(Modifiable& stackchan)
@@ -114,7 +137,14 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 // then interrupts with "Hi!" and listening resumes
                 // post-TTS. Tag with "face" so server logs can tell
                 // this trigger from a real wake-word detection.
-                Application::GetInstance().WakeWordInvoke("face");
+                //
+                // Phase 3 — gated on the IDLE profile only. With the
+                // modifier now alive across LISTENING/SPEAKING, a face
+                // re-acquired mid-chat must NOT re-trigger wake-word —
+                // that would interrupt the running session.
+                if (_profile.allow_wake_word_invoke) {
+                    Application::GetInstance().WakeWordInvoke("face");
+                }
             }
             break;
 

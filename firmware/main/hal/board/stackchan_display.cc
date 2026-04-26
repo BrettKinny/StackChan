@@ -556,17 +556,36 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // disable in everything else) silently killed walk-up greetings
     // whenever the device missed the transition back to STANDBY,
     // because face_detected events stopped reaching the bridge.
-    // The face *tracking* modifier (servo head movement) is still
-    // gated below so the head doesn't track faces mid-reply.
     if (!is_sleeping_) {
         FaceDetector::getInstance().setEnabled(true);
     }
 
+    // Phase 3 — face_tracking + idle_motion stay alive across LISTENING /
+    // SPEAKING / STANDBY so the head doesn't go dead-eyed mid-chat. Lazy-
+    // create on the first SetStatus call (any state); per-state behaviour
+    // is driven by the ChatProfile pushed via setChatProfile() further down.
+    // Sleep entry still removes both modifiers — see the sleep handler at
+    // ~line 374. That remains the only chat-related lifecycle removal point.
+    if (!is_sleeping_) {
+        if (face_tracking_modifier_id_ < 0) {
+            face_tracking_modifier_id_ = stackchan.addModifier(
+                std::make_unique<FaceTrackingModifier>());
+        }
+        if (idle_motion_modifier_id_ < 0) {
+            idle_motion_modifier_id_ = stackchan.addModifier(
+                std::make_unique<IdleMotionModifier>());
+        }
+    }
+
     bool is_idle      = false;
     bool is_listening = false;
+    bool is_speaking  = false;
+    const ChatProfile* profile_to_push = nullptr;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         in_listening_status_ = true;
+        is_listening         = true;
+        profile_to_push      = &kChatProfileListening;
         if (speaking_modifier_id_ >= 0) {
             stackchan.removeModifier(speaking_modifier_id_);
             avatar.mouth().setWeight(0);
@@ -590,6 +609,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         _is_xiaozhi_ready = true;
         in_listening_status_ = false;
         thinking_led_pending_ = false;
+        is_idle              = true;
+        profile_to_push      = &kChatProfileIdle;
         esp_timer_stop(thinking_timer_);
 
         if (speaking_modifier_id_ >= 0) {
@@ -603,8 +624,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             thinking_modifier_id_ = -1;
         }
 
-        is_idle = true;
-
         set_left_leds(0, 0, 0);
 
         esp_timer_stop(bubble_clear_timer_);
@@ -613,6 +632,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         in_listening_status_ = false;
         thinking_led_pending_ = false;
+        is_speaking          = true;
+        profile_to_push      = &kChatProfileSpeaking;
         esp_timer_stop(thinking_timer_);
         if (thinking_modifier_id_ >= 0) {
             stackchan.removeModifier(thinking_modifier_id_);
@@ -630,25 +651,27 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         avatar.setSpeech(status);
     }
 
-    if (is_idle) {
-        // Start idle motion
-        ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
-            idle_motion_modifier_id_     = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
+    // Phase 3 — push the chat-state profile to face_tracking. setChatProfile
+    // threads through to idle_motion (overlay cadence + amplitude) so both
+    // modifiers reflect the new chat state without further plumbing here.
+    if (profile_to_push) {
+        if (auto* ft = static_cast<FaceTrackingModifier*>(
+                stackchan.getModifierByName(FaceTrackingModifier::kName))) {
+            ft->setChatProfile(*profile_to_push);
         }
+    }
 
-        // Face detector is enabled at function entry (decoupled from
-        // chat state). Add the tracking modifier so the head follows
-        // the bbox while idle.
-        if (face_tracking_modifier_id_ < 0) {
-            // FaceTrackingModifier resolves IdleMotionModifier by stable
-            // name on each pause/resume rather than caching a pool ID,
-            // so no handle is passed at construction.
-            face_tracking_modifier_id_ = stackchan.addModifier(
-                std::make_unique<FaceTrackingModifier>());
+    if (is_idle) {
+        // idle_expression is the FACE-expression overlay (separate from
+        // gaze) — still IDLE-gated because we don't want random expression
+        // changes mid-listening or mid-speaking.
+        if (idle_expression_modifier_id_ < 0) {
+            idle_expression_modifier_id_ = stackchan.addModifier(
+                std::make_unique<IdleExpressionModifier>());
         }
-        // Cyan right LED = face-detection mode active
+        // Cyan right LED = "ready, watching for you" in standby. Stays
+        // IDLE-gated even though face_tracking is now always alive — the
+        // LED communicates "open to greeting", not "tracking running".
         stackchan.rightNeonLight().setColor(0, 168, 168);
 
         // Phase 1.2: register the ambient sound localizer once. Its
@@ -665,25 +688,17 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
                 });
         }
     } else {
-        // Stop face *tracking* (servo follow) — but leave the detector
-        // running so face_detected events still flow to the bridge
-        // throughout the listen / think / speak phases.
-        if (face_tracking_modifier_id_ >= 0) {
-            stackchan.removeModifier(face_tracking_modifier_id_);
-            face_tracking_modifier_id_ = -1;
+        // Phase 3: face_tracking + idle_motion are NOT removed here —
+        // both stay alive for the whole session and are tuned per chat
+        // state via setChatProfile (above). The only chat-related lifecycle
+        // removal is the sleep handler (~line 374).
+        if (idle_expression_modifier_id_ >= 0) {
+            stackchan.removeModifier(idle_expression_modifier_id_);
+            idle_expression_modifier_id_ = -1;
         }
         // Clear cyan mode-active LED. The left LED is owned by the chat-state
         // set_left_leds() call earlier in this function, so don't touch it here.
         stackchan.rightNeonLight().setColor(0, 0, 0);
-
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
-        }
     }
 
     // Clear sleep state
