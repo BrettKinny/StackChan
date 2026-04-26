@@ -24,9 +24,12 @@ private:
     // pool's free-list reuses slots, so if IdleMotionModifier was
     // destroyed and recreated (e.g. round-tripping through a non-idle
     // status), the ID held here would no longer point at the live
-    // instance and pause/resume would silently no-op.
-    void pauseIdleMotion();
-    void resumeIdleMotion();
+    // instance and the call would silently no-op.
+    //
+    // Phase 2 — single setter replaces the prior pauseIdleMotion /
+    // resumeIdleMotion pair. true → idle modifier emits the reduced
+    // overlay action set; false → full idle motion resumes.
+    void setIdleTrackingMode(bool tracking);
     void setTrackingLed(Modifiable& stackchan, bool on);
     // Issues a servo command toward (_smooth_x, _smooth_y) at kLookAtSpeed,
     // but only if the move clears the deadband vs. last commanded target.

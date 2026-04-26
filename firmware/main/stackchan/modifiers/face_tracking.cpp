@@ -102,7 +102,7 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 // Force first command to fire regardless of deadband when
                 // we (re-)acquire a face after an idle gap.
                 _last_cmd_valid = false;
-                pauseIdleMotion();
+                setIdleTrackingMode(true);
                 setTrackingLed(stackchan, true);
                 Application::GetInstance().SendEvent("face_detected", "{}");
                 // Open the mic on face acquisition — same path as a
@@ -140,7 +140,7 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
             } else if (now - _grace_start > _grace_period_ms) {
                 _state = State::Idle;
                 _last_cmd_valid = false;
-                resumeIdleMotion();
+                setIdleTrackingMode(false);
                 setTrackingLed(stackchan, false);
                 Application::GetInstance().SendEvent("face_lost", "{}");
             }
@@ -174,18 +174,11 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
     // ---------------------------------------------------------------------
 }
 
-void FaceTrackingModifier::pauseIdleMotion()
+void FaceTrackingModifier::setIdleTrackingMode(bool tracking)
 {
     auto* idle = static_cast<IdleMotionModifier*>(
         ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
-    if (idle) idle->pause();
-}
-
-void FaceTrackingModifier::resumeIdleMotion()
-{
-    auto* idle = static_cast<IdleMotionModifier*>(
-        ::GetStackChan().getModifierByName(IdleMotionModifier::kName));
-    if (idle) idle->resume();
+    if (idle) idle->setTrackingMode(tracking);
 }
 
 void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
