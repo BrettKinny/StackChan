@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -31,10 +32,27 @@ class SoundLocalizer {
 public:
     SoundLocalizer() = default;
 
+    // Canonical singleton — same instance read by Application::HandleWakeWordDetectedEvent
+    // (via GetRecentDirection) and written by the audio task callback registered in
+    // stackchan_display.cc. Function-local static; safe to call before/after init.
+    static SoundLocalizer& Instance();
+
     // Called from the audio input task (Core 0 / dedicated task — not
     // the main task). Frame is 320 int16_t at 16 kHz / 10 ms when
     // input_channels == 2. Cheap (zero-cost when in cooldown).
     void OnStereoFrame(const std::vector<int16_t>& interleaved_lr);
+
+    // Snapshot of the dominant direction over the past `window_us` microseconds.
+    // Reads the ring buffer written by OnStereoFrame; aggregates per-channel
+    // energy across the window; returns L/C/R using the same kBalanceThreshold
+    // rule as the live Localize(). Used by HandleWakeWordDetectedEvent to
+    // attach a direction to the wake event. Safe to call from any task.
+    struct DirSummary {
+        const char* direction;  // "left" | "centre" | "right"
+        double      balance;
+        double      energy;
+    };
+    DirSummary GetRecentDirection(int64_t window_us = 1500000) const;
 
 private:
     enum class Direction { Left, Centre, Right };
@@ -62,6 +80,20 @@ private:
     // while passing speech (fundamental ~100-300 Hz, formants 500-3000 Hz —
     // formants alone carry enough energy for direction localisation).
     static constexpr float   kHpAlpha          = 0.8946f;  // for fc=300Hz, fs=16kHz
+
+    // Ring of per-frame energy samples. Written by OnStereoFrame on the
+    // audio task, read by GetRecentDirection on whoever calls it. The head
+    // index is atomic with release/acquire semantics; slot data is plain
+    // (a torn read of one slot among ~150 in the aggregation window is
+    // dominated by the rest — acceptable for direction estimation).
+    struct DirSample {
+        int64_t ts_us;
+        int64_t left_energy;
+        int64_t right_energy;
+    };
+    static constexpr size_t   kRingSize = 200;  // ~2 s at 10 ms frames
+    DirSample                 _ring[kRingSize] = {};
+    std::atomic<size_t>       _ring_head{0};
 };
 
 }  // namespace stackchan

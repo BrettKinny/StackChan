@@ -682,13 +682,15 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // callback fires from the audio input task whenever stereo
         // PCM is read (always, since wake-word is running at idle),
         // emits sound_event(direction) on direction change.
+        // Singleton lives in SoundLocalizer::Instance() so the wake-word
+        // handler in Application can read its ring buffer for direction
+        // snapshots at wake time.
         static bool s_sound_localizer_registered = false;
         if (!s_sound_localizer_registered) {
             s_sound_localizer_registered = true;
-            static stackchan::SoundLocalizer s_sound_localizer;
             Application::GetInstance().GetAudioService().OnStereoFrame(
                 [](const std::vector<int16_t>& lr) {
-                    s_sound_localizer.OnStereoFrame(lr);
+                    stackchan::SoundLocalizer::Instance().OnStereoFrame(lr);
                 });
         }
     } else {
