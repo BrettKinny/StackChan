@@ -326,47 +326,12 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
         }
     }
 
-    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
+    if (!startStreaming()) {
         close(video_fd_);
         video_fd_      = -1;
         sensor_format_ = 0;
         return;
     }
-
-#ifdef CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
-    // 当启用 ISP 时，ISP 需要一些照片来初始化参数，因此开启后后台拍摄5s照片并丢弃
-    xTaskCreate(
-        [](void* arg) {
-            Esp32Camera* self      = static_cast<Esp32Camera*>(arg);
-            uint16_t capture_count = 0;
-            TickType_t start       = xTaskGetTickCount();
-            TickType_t duration    = 5000 / portTICK_PERIOD_MS;  // 5s
-            while ((xTaskGetTickCount() - start) < duration) {
-                struct v4l2_buffer buf = {};
-                buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory             = V4L2_MEMORY_MMAP;
-                if (ioctl(self->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
-                    vTaskDelay(10 / portTICK_PERIOD_MS);
-                    continue;
-                }
-                if (ioctl(self->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_QBUF failed during init");
-                }
-                capture_count++;
-            }
-            ESP_LOGI(TAG, "Camera init success, captured %d frames in %dms", capture_count,
-                     (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
-            self->streaming_on_ = true;
-            vTaskDelete(NULL);
-        },
-        "CameraInitTask", 4096, this, 5, nullptr);
-#else
-    ESP_LOGI(TAG, "Camera init success");
-    streaming_on_ = true;
-#endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
 }
 
 StackChanCamera::~StackChanCamera()
@@ -887,11 +852,58 @@ bool StackChanCamera::isStreaming() const
 
 bool StackChanCamera::startStreaming()
 {
-    // Stub for commit 1 of the lifecycle refactor — the constructor still
-    // issues VIDIOC_STREAMON inline, so this is a no-op. Commit 2 moves
-    // the STREAMON + ISP-warmup logic into this body; commit 4 defers
-    // the call out of the constructor to first guard acquisition.
+    if (streaming_on_ || video_fd_ < 0) {
+        // Idempotent: already streaming, or constructor failed to open
+        // the V4L2 device. Either way, nothing to do.
+        return streaming_on_;
+    }
+
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
+        return false;
+    }
+
+#ifdef CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
+    // 当启用 ISP 时，ISP 需要一些照片来初始化参数，因此开启后后台拍摄5s照片并丢弃
+    // streaming_on_ flips true asynchronously when the warmup task ends —
+    // until then, isStreaming() returns false even though VIDIOC_STREAMON
+    // has been accepted. The ISP autoexposure isn't usable yet anyway.
+    xTaskCreate(
+        [](void* arg) {
+            Esp32Camera* self      = static_cast<Esp32Camera*>(arg);
+            uint16_t capture_count = 0;
+            TickType_t start       = xTaskGetTickCount();
+            TickType_t duration    = 5000 / portTICK_PERIOD_MS;  // 5s
+            while ((xTaskGetTickCount() - start) < duration) {
+                struct v4l2_buffer buf = {};
+                buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                buf.memory             = V4L2_MEMORY_MMAP;
+                if (ioctl(self->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+                    ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
+                    vTaskDelay(10 / portTICK_PERIOD_MS);
+                    continue;
+                }
+                if (ioctl(self->video_fd_, VIDIOC_QBUF, &buf) != 0) {
+                    ESP_LOGE(TAG, "VIDIOC_QBUF failed during init");
+                }
+                capture_count++;
+            }
+            ESP_LOGI(TAG, "Camera init success, captured %d frames in %dms", capture_count,
+                     (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+            self->streaming_on_ = true;
+            vTaskDelete(NULL);
+        },
+        "CameraInitTask", 4096, this, 5, nullptr);
+    // Returning true here means "STREAMON ioctl succeeded" — streaming_on_
+    // becomes observable shortly. Caller should treat the return as an
+    // ack, not a "ready to dequeue" signal.
     return true;
+#else
+    ESP_LOGI(TAG, "Camera init success");
+    streaming_on_ = true;
+    return true;
+#endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
 }
 
 void StackChanCamera::stopStreaming()
