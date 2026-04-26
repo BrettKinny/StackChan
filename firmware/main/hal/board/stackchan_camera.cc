@@ -879,13 +879,26 @@ bool StackChanCamera::Capture()
 
 bool StackChanCamera::isStreaming() const
 {
-    // TODO(privacy-led-step-4): replace with V4L2 truth (streaming_on_
-    // AND a consumer is actively dequeuing). Today VIDIOC_STREAMON is
-    // permanent after construction so the camera is always streaming;
-    // returning true unconditionally matches that reality. Step 4-5
-    // will move STREAMON out of the constructor and tie this to the
-    // refcounted CameraPeripheralGuard.
+    // V4L2 truth, flipped by startStreaming()/stopStreaming(). The
+    // refcounted CameraPeripheralGuard is the only legitimate caller of
+    // those, so this tracks the actual VIDIOC_STREAMON state.
+    return streaming_on_;
+}
+
+bool StackChanCamera::startStreaming()
+{
+    // Stub for commit 1 of the lifecycle refactor — the constructor still
+    // issues VIDIOC_STREAMON inline, so this is a no-op. Commit 2 moves
+    // the STREAMON + ISP-warmup logic into this body; commit 4 defers
+    // the call out of the constructor to first guard acquisition.
     return true;
+}
+
+void StackChanCamera::stopStreaming()
+{
+    // Stub for commit 1 of the lifecycle refactor — the destructor still
+    // issues VIDIOC_STREAMOFF inline. See startStreaming() for the
+    // rollout sequence.
 }
 
 bool StackChanCamera::StreamCaptures()

@@ -20,6 +20,10 @@ struct JpegChunk {
     size_t len;
 };
 
+namespace stackchan::privacy {
+class CameraPeripheralGuard;
+}
+
 class StackChanCamera : public Camera {
 private:
     struct FrameBuffer {
@@ -58,6 +62,17 @@ private:
     std::string DeriveFaceUrl(const std::string& verb) const;
     std::string SimpleBridgeRequest(const std::string& method, const std::string& url,
                                     const std::string& content_type, const std::string& body);
+
+    // Privacy LED steps 4-5 lifecycle. Reachable only through the friend
+    // CameraPeripheralGuard refcount — the only path that should toggle
+    // V4L2 stream state. startStreaming() may block up to 5 s for ISP
+    // autoexposure warmup on first call; subsequent calls are cheap and
+    // return early when streaming_on_ is already true. stopStreaming()
+    // is a no-op when already stopped. Both ignore failure to keep the
+    // guard refcount honest — diagnostics surface via streaming_on_.
+    bool startStreaming();
+    void stopStreaming();
+    friend class stackchan::privacy::CameraPeripheralGuard;
 
 public:
     StackChanCamera(const esp_video_init_config_t& config);
