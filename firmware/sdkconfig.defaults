@@ -88,13 +88,13 @@ CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
 
 # === HEAP-LEAK DEBUG BRANCH (dotty-heap-debug) ===
-# DO NOT MERGE INTO dotty — these add ~3 KB binary growth + per-alloc
-# overhead; only valid for the WS reconnect leak hunt. Revert before
-# shipping to production. Enables heap_caps_dump_all() forensic
-# snapshots and per-task allocation tracking via
-# heap_caps_print_heap_info() — top suspect per the investigation
-# plan is a leaked ssl_receive task stack (4 KB matches the ~6 KB
-# observed cycle delta).
-CONFIG_HEAP_TRACING_OFF=n
-CONFIG_HEAP_TRACING_STANDALONE=y
-CONFIG_HEAP_TASK_TRACKING=y
+# DO NOT MERGE INTO dotty.
+# The HEAPDUMP instrumentation in application.cc uses heap_caps_get_info()
+# + heap_caps_dump_all(), both of which work with stock ESP-IDF heap
+# accounting (no tracing config required). The original investigation
+# plan suggested CONFIG_HEAP_TASK_TRACKING=y for per-task visibility, but
+# enabling it boot-loops the device — heap_caps_update_per_task_info_alloc
+# fires on the very first malloc inside esp_intr_alloc, before the task
+# table is built (LoadProhibited on Core 1 during xPortStartScheduler).
+# Per-task visibility wasn't actually used by our HEAPDUMP markers, so
+# all three flags are removed. The instrumentation works without them.
