@@ -8,50 +8,34 @@
 #include "idle_motion.h"
 #include "application.h"  // Phase 1.2: server-bound perception events
 
-#include "esp_log.h"
-
 #include <cmath>
 
 namespace stackchan {
-
-static const char* TAG = "face_tracking";
-
-// Phase 0 instrumentation window (see probes/face-tracking-naturalness.md).
-static constexpr uint32_t kPhase0WindowMs = 5000;
 
 // ---------------------------------------------------------------------------
 // Tracking tuning knobs — keep all magic numbers here so reverts are one-line.
 //
 // kEmaAlpha           : EMA smoothing factor for face center.
-//                       History: 0.3f → 0.5f → 0.7f. 0.3f was visibly laggy
-//                       at ~3 fps detection; 0.5f filtered too much of the
-//                       small natural sway we want to track; 0.7f keeps the
-//                       single-frame-jitter rejection but reacts to slow
-//                       drifts after only one or two frames. Range
-//                       [0.0..1.0], higher = more responsive.
-//                       Revert to 0.5f if servo motion looks twitchy.
+//                       Previous value 0.3f produced visibly laggy tracking
+//                       at ~3 fps detection. 0.5f reacts faster while still
+//                       filtering single-frame jitter. Range [0.0..1.0],
+//                       higher = more responsive, less smoothing.
 //
 // kLookAtSpeed        : Servo move speed (deg/sec) handed to
-//                       Motion::lookAtNormalized(). 500 keeps up with a
-//                       moving face without visible overshoot at close
-//                       range. The motion layer clamps so values aren't
-//                       unbounded.
+//                       Motion::lookAtNormalized(). Previous 350 was slow
+//                       enough to lag a moving face; 500 keeps up better.
+//                       The motion layer clamps so values aren't unbounded.
 //
 // kDeadbandFrac       : Minimum fractional change in normalized x/y before
 //                       we re-issue a servo command. Frame-normalized coords
 //                       are in [-1..1], so a "frame-width" delta = 2.0; this
-//                       constant is fraction of that span.
-//                       History: 0.06f (≈ 3% of full span on each axis) was
-//                       large enough that breathing / millimetre head sway
-//                       never cleared it, producing the "head freezes once
-//                       locked" feel. 0.02f (≈ 1% per axis) lets natural
-//                       small drifts move the servos while still rejecting
-//                       sub-pixel detector chatter.
-//                       Revert to 0.06f if gearbox audibly chatters.
+//                       constant is fraction of that span. 0.06f ≈ 3% of
+//                       frame width on each axis. Below this, micro-jitter
+//                       from the detector chatters the gearbox for no gain.
 // ---------------------------------------------------------------------------
-static constexpr float kEmaAlpha     = 0.7f;   // history: 0.3f → 0.5f → 0.7f (Phase 1)
-static constexpr int   kLookAtSpeed  = 500;    // unchanged in Phase 1
-static constexpr float kDeadbandFrac = 0.02f;  // history: 0.06f → 0.02f (Phase 1)
+static constexpr float kEmaAlpha     = 0.5f;   // was 0.3f
+static constexpr int   kLookAtSpeed  = 500;    // was 350
+static constexpr float kDeadbandFrac = 0.06f;  // was effectively 0 (no deadband)
 
 FaceTrackingModifier::FaceTrackingModifier()
 {
@@ -70,28 +54,6 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
     uint32_t ts = 0;
 
     if (!result.read(detected, raw_x, raw_y, size, ts)) return;
-
-    // ---- Phase 0 instrumentation: counters update -----------------------
-    // Lazy-init window start on first call so the first window is full-length.
-    if (_phase0_window_start_ms == 0) _phase0_window_start_ms = now;
-
-    // Time-in-Tracking accumulator: skip the very first tick (no prior tick
-    // to delta against), then add dt to track_ms only while in Tracking.
-    if (_phase0_last_tick_ms != 0) {
-        uint32_t dt = now - _phase0_last_tick_ms;
-        if (_state == State::Tracking) _phase0_track_ms += dt;
-    }
-    _phase0_last_tick_ms = now;
-
-    _phase0_samples++;
-    if (detected) _phase0_det++;
-    // Detector FPS = unique-frame count / window. Rising ts means the
-    // detector wrote a new frame between this tick and the last.
-    if (ts != _phase0_last_seen_ts) {
-        _phase0_unique_frames++;
-        _phase0_last_seen_ts = ts;
-    }
-    // ---------------------------------------------------------------------
 
     switch (_state) {
         case State::Idle:
@@ -146,32 +108,6 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
             }
             break;
     }
-
-    // ---- Phase 0 instrumentation: window emit ---------------------------
-    // One ESP_LOGI line per ~5 s window, then reset counters. Format
-    // documented in probes/face-tracking-naturalness.md §3.
-    uint32_t window_age = now - _phase0_window_start_ms;
-    if (window_age >= kPhase0WindowMs) {
-        float det_pct   = _phase0_samples ? (100.0f * _phase0_det / _phase0_samples) : 0.0f;
-        float fps       = window_age      ? (1000.0f * _phase0_unique_frames / window_age) : 0.0f;
-        float track_pct = window_age      ? (100.0f * _phase0_track_ms / window_age) : 0.0f;
-        ESP_LOGI(TAG,
-            "phase0 win_ms=%u samples=%u det=%u (%.1f%%) fps=%.1f track_ms=%u (%.1f%%) cmd=%u",
-            (unsigned)window_age,
-            (unsigned)_phase0_samples,
-            (unsigned)_phase0_det, det_pct,
-            fps,
-            (unsigned)_phase0_track_ms, track_pct,
-            (unsigned)_phase0_cmd);
-
-        _phase0_window_start_ms = now;
-        _phase0_samples         = 0;
-        _phase0_det             = 0;
-        _phase0_unique_frames   = 0;
-        _phase0_track_ms        = 0;
-        _phase0_cmd             = 0;
-    }
-    // ---------------------------------------------------------------------
 }
 
 void FaceTrackingModifier::pauseIdleMotion()
@@ -205,7 +141,6 @@ void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
     _last_cmd_x = _smooth_x;
     _last_cmd_y = _smooth_y;
     _last_cmd_valid = true;
-    _phase0_cmd++;  // Phase 0 instrumentation — count actually-issued commands.
 }
 
 void FaceTrackingModifier::setTrackingLed(Modifiable& stackchan, bool on)
