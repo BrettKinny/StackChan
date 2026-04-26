@@ -1,8 +1,41 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..e2ea9ea 100644
+index d69d43d..261eb87 100644
 --- c/main/application.cc
 +++ w/main/application.cc
-@@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
+@@ -526,7 +526,6 @@ void Application::InitializeProtocol() {
+             if (strcmp(state->valuestring, "start") == 0) {
+                 Schedule([this]() {
+                     aborted_ = false;
+-                    SetDeviceState(kDeviceStateSpeaking);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+                 Schedule([this]() {
+@@ -542,7 +541,10 @@ void Application::InitializeProtocol() {
+                 auto text = cJSON_GetObjectItem(root, "text");
+                 if (cJSON_IsString(text)) {
+                     ESP_LOGI(TAG, "<< %s", text->valuestring);
+-                    Schedule([display, message = std::string(text->valuestring)]() {
++                    Schedule([this, display, message = std::string(text->valuestring)]() {
++                        if (GetDeviceState() != kDeviceStateSpeaking) {
++                            SetDeviceState(kDeviceStateSpeaking);
++                        }
+                         display->SetChatMessage("assistant", message.c_str());
+                     });
+                 }
+@@ -553,10 +555,12 @@ void Application::InitializeProtocol() {
+                 ESP_LOGI(TAG, ">> %s", text->valuestring);
+                 Schedule([display, message = std::string(text->valuestring)]() {
+                     display->SetChatMessage("user", message.c_str());
++                    display->SetEmotion("thinking");
+                 });
+             }
+         } else if (strcmp(type->valuestring, "llm") == 0) {
+             auto emotion = cJSON_GetObjectItem(root, "emotion");
++            ESP_LOGW(TAG, "LLM frame received, emotion=%s", cJSON_IsString(emotion) ? emotion->valuestring : "null");
+             if (cJSON_IsString(emotion)) {
+                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                     display->SetEmotion(emotion_str.c_str());
+@@ -610,33 +614,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -64,7 +97,33 @@ index d69d43d..e2ea9ea 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -1075,6 +1078,28 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -711,13 +718,23 @@ void Application::HandleToggleChatEvent() {
+ }
+ 
+ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+-    // Check state again in case it was changed during scheduling
+     if (GetDeviceState() != kDeviceStateConnecting) {
+         return;
+     }
+ 
+     if (!protocol_->IsAudioChannelOpened()) {
+-        if (!protocol_->OpenAudioChannel()) {
++        for (int attempt = 0; attempt < 3; attempt++) {
++            if (protocol_->OpenAudioChannel()) {
++                break;
++            }
++            if (attempt < 2) {
++                vTaskDelay(pdMS_TO_TICKS(500));
++                if (GetDeviceState() != kDeviceStateConnecting) {
++                    return;
++                }
++            }
++        }
++        if (!protocol_->IsAudioChannelOpened()) {
+             return;
+         }
+     }
+@@ -1075,6 +1092,28 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -280,10 +339,27 @@ index 3692e0c..7bfbc5c 100644
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
 diff --git c/main/audio/audio_service.cc w/main/audio/audio_service.cc
-index 350ac58..88d50e6 100644
+index 350ac58..ab2912d 100644
 --- c/main/audio/audio_service.cc
 +++ w/main/audio/audio_service.cc
-@@ -270,6 +270,12 @@ void AudioService::AudioInputTask() {
+@@ -158,12 +158,13 @@ void AudioService::Start() {
+     }, "audio_output", 2048, this, 4, &audio_output_task_handle_);
+ #endif
+ 
+-    /* Start the opus codec task */
+-    xTaskCreate([](void* arg) {
++    /* Start the opus codec task — priority above audio_output (4), pinned to Core 1
++       to avoid WiFi contention on Core 0 */
++    xTaskCreatePinnedToCore([](void* arg) {
+         AudioService* audio_service = (AudioService*)arg;
+         audio_service->OpusCodecTask();
+         vTaskDelete(NULL);
+-    }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
++    }, "opus_codec", 2048 * 12, this, 6, &opus_codec_task_handle_, 1);
+ }
+ 
+ void AudioService::Stop() {
+@@ -270,6 +271,12 @@ void AudioService::AudioInputTask() {
              int samples = 160; // 10ms
              std::vector<int16_t> data;
              if (ReadAudioData(data, 16000, samples)) {
@@ -297,16 +373,24 @@ index 350ac58..88d50e6 100644
                      wake_word_->Feed(data);
                  }
 diff --git c/main/audio/audio_service.h w/main/audio/audio_service.h
-index 99db546..f90410b 100644
+index 99db546..4e0b5dc 100644
 --- c/main/audio/audio_service.h
 +++ w/main/audio/audio_service.h
-@@ -127,6 +127,15 @@ public:
+@@ -38,7 +38,7 @@
+ 
+ #define OPUS_FRAME_DURATION_MS 60
+ #define MAX_ENCODE_TASKS_IN_QUEUE 2
+-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
++#define MAX_PLAYBACK_TASKS_IN_QUEUE 4
+ #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+ #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+ #define AUDIO_TESTING_MAX_DURATION_MS 10000
+@@ -127,6 +127,14 @@ public:
  
      void SetCallbacks(AudioServiceCallbacks& callbacks);
  
-+    // Dotty: ambient sound localization. Receives interleaved L/R PCM
-+    // (int16, 16 kHz) frames before the wake-word + audio processor
-+    // dispatch. Fires whenever audio is being read (i.e. wake-word is
++    // Dotty: ambient sound localizer hook. Subscribes to interleaved
++    // stereo PCM frames as they're read from the codec (always while wake-word is
 +    // running, which is true at idle). Subscriber is responsible for
 +    // its own thread-safety; the callback runs on the audio input task.
 +    void OnStereoFrame(std::function<void(const std::vector<int16_t>&)> cb) {
@@ -316,16 +400,100 @@ index 99db546..f90410b 100644
      bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
      std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
      void PlaySound(const std::string_view& sound);
-@@ -174,6 +183,9 @@ private:
-     // For server AEC
-     std::deque<uint32_t> timestamp_queue_;
- 
+@@ -137,6 +145,8 @@ public:
+ private:
+     AudioCodec* codec_ = nullptr;
+     AudioServiceCallbacks callbacks_;
 +    // Dotty: stereo frame callback for ambient sound localization.
 +    std::function<void(const std::vector<int16_t>&)> stereo_frame_callback_;
+     std::unique_ptr<AudioProcessor> audio_processor_;
+     std::unique_ptr<WakeWord> wake_word_;
+     std::unique_ptr<AudioDebugger> audio_debugger_;
+diff --git c/main/audio/wake_words/afe_wake_word.cc w/main/audio/wake_words/afe_wake_word.cc
+index 8fc5fef..f0f3a42 100644
+--- c/main/audio/wake_words/afe_wake_word.cc
++++ w/main/audio/wake_words/afe_wake_word.cc
+@@ -162,6 +162,10 @@ void AfeWakeWord::AudioDetectionTask() {
+ 
+ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+     // store audio data to wake_word_pcm_
++    // Mutex-protected: the encoder task in EncodeWakeWordData() also iterates
++    // wake_word_pcm_; concurrent emplace/pop here vs. range-for there
++    // corrupts the deque and triggers tlsf_free double-free on dtor.
++    std::lock_guard<std::mutex> lock(wake_word_mutex_);
+     wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
+     // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
+     while (wake_word_pcm_.size() > 2000 / 30) {
+@@ -171,7 +175,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+ 
+ void AfeWakeWord::EncodeWakeWordData() {
+     const size_t stack_size = 4096 * 6;
+-    wake_word_opus_.clear();
++    {
++        // wake_word_opus_ is consumed by GetWakeWordOpus under the same
++        // mutex; clear here must be locked too or the consumer can race
++        // with the deque resetting and dereference invalid memory.
++        std::lock_guard<std::mutex> lock(wake_word_mutex_);
++        wake_word_opus_.clear();
++    }
+     if (wake_word_encode_task_stack_ == nullptr) {
+         wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
+         assert(wake_word_encode_task_stack_ != nullptr);
+@@ -208,8 +218,19 @@ void AfeWakeWord::EncodeWakeWordData() {
+             std::vector<int16_t> in_buffer;
+             esp_audio_enc_in_frame_t in = {};
+             esp_audio_enc_out_frame_t out = {};
+-            
+-            for (auto& pcm: this_->wake_word_pcm_) {
 +
-     bool wake_word_initialized_ = false;
-     bool audio_processor_initialized_ = false;
-     bool voice_detected_ = false;
++            // Drain wake_word_pcm_ under the mutex into a local copy so we
++            // can iterate without racing StoreWakeWordData() (called from
++            // the audio detection callback). Iterating the live deque while
++            // the producer mutates it corrupts the structure and causes a
++            // tlsf_free double-free when vectors are later destroyed.
++            std::deque<std::vector<int16_t>> local_pcm;
++            {
++                std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
++                local_pcm.swap(this_->wake_word_pcm_);
++            }
++
++            for (auto& pcm: local_pcm) {
+                 if (in_buffer.empty()) {
+                     in_buffer = std::move(pcm);
+                 } else {
+@@ -238,7 +259,9 @@ void AfeWakeWord::EncodeWakeWordData() {
+                     in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
+                 }
+             }
+-            this_->wake_word_pcm_.clear();
++            // local_pcm goes out of scope at lambda end and frees its own
++            // vectors safely; no clear of the live deque needed (we already
++            // moved its contents out under the mutex above).
+             // Close encoder
+             esp_opus_enc_close(encoder_handle);
+             auto end_time = esp_timer_get_time();
+diff --git c/main/mcp_server.cc w/main/mcp_server.cc
+index 7cd7ba0..09733d8 100644
+--- c/main/mcp_server.cc
++++ w/main/mcp_server.cc
+@@ -13,6 +13,7 @@
+ #include "application.h"
+ #include "display.h"
+ #include "oled_display.h"
++#include <hal/hal.h>
+ #include "board.h"
+ #include "settings.h"
+ #include "lvgl_theme.h"
+@@ -109,7 +110,8 @@ void McpServer::AddCommonTools() {
+                 Property("question", kPropertyTypeString)
+             }),
+             [camera](const PropertyList& properties) -> ReturnValue {
+-                // Lower the priority to do the camera capture
++                GetHAL().setCameraLedActive(true, 10000);
++
+                 TaskPriorityReset priority_reset(1);
+ 
+                 if (!camera->Capture()) {
 diff --git c/main/protocols/protocol.cc w/main/protocols/protocol.cc
 index 470cc91..53675f5 100644
 --- c/main/protocols/protocol.cc
@@ -359,3 +527,23 @@ index 28ef604..510e91f 100644
  
  protected:
      std::function<void(const cJSON* root)> on_incoming_json_;
+diff --git c/main/protocols/websocket_protocol.cc w/main/protocols/websocket_protocol.cc
+index f0cc034..34739af 100644
+--- c/main/protocols/websocket_protocol.cc
++++ w/main/protocols/websocket_protocol.cc
+@@ -78,6 +78,7 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
+ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
+     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+     websocket_.reset();
++    vTaskDelay(pdMS_TO_TICKS(200));
+ }
+ 
+ bool WebsocketProtocol::OpenAudioChannel() {
+@@ -150,6 +151,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
+             auto root = cJSON_Parse(data);
+             auto type = cJSON_GetObjectItem(root, "type");
+             if (cJSON_IsString(type)) {
++                ESP_LOGE(TAG, "WS recv type=%s", type->valuestring);
+                 if (strcmp(type->valuestring, "hello") == 0) {
+                     ParseServerHello(root);
+                 } else {
