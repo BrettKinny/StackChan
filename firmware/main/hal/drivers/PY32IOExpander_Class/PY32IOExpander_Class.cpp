@@ -325,7 +325,8 @@ void PY32IOExpander_Class::setPwmFrequency(uint16_t freq)
 void PY32IOExpander_Class::setLedCount(uint8_t count)
 {
     if (count > 32) count = 32;
-    writeRegister8(REG_LED_CFG, count & 0x3F);
+    _led_cfg_cached = count & 0x3F;
+    writeRegister8(REG_LED_CFG, _led_cfg_cached);
 }
 
 void PY32IOExpander_Class::setLedColor(uint8_t index, uint16_t color565)
@@ -356,8 +357,7 @@ void PY32IOExpander_Class::setLedData(const uint8_t* data, size_t len)
 
 void PY32IOExpander_Class::refreshLeds()
 {
-    uint8_t val = readRegister8(REG_LED_CFG);
-    writeRegister8(REG_LED_CFG, val | (1 << 6));
+    writeRegister8(REG_LED_CFG, _led_cfg_cached | (1 << 6));
 }
 
 }  // namespace m5
