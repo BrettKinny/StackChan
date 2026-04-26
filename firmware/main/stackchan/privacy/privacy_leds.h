@@ -69,25 +69,39 @@ namespace stackchan::privacy {
 // LED ring indices reserved for Layer 1 privacy indicators.
 // Right ring spans global 6..11; we take 6 and 7. Indices 8..11 stay
 // available to the existing chat-state ring animations.
-constexpr uint8_t kMicLedIndex    = 6;  // global; right-ring local index 0
-constexpr uint8_t kCameraLedIndex = 7;  // global; right-ring local index 1
+// Privacy pixels at OPPOSITE ENDS of the right ring (was 6 + 7, both at
+// the top — visually crowded). Now top + bottom, leaving indices 7-10 in
+// the middle free for future indicators (cloud-connection, smart-mode
+// pip, etc.).
+constexpr uint8_t kMicLedIndex    = 6;   // global; top of right ring
+constexpr uint8_t kCameraLedIndex = 11;  // global; bottom of right ring
 
-// Colour palette. Distinct from existing scheme:
-//   - left-ring chat states use yellow / purple / green / blue
-//   - right-ring face-detect uses cyan (0, 168, 168)
-//   - face-tracking uses left-ring solid green (0, 168, 0)
-// Pure white and pure red are NOT used elsewhere.
-constexpr uint8_t kMicLocalR    = 40;
-constexpr uint8_t kMicLocalG    = 40;
-constexpr uint8_t kMicLocalB    = 40;
+// Universal recording-light convention. Mic = GREEN ("Dotty is listening"),
+// Camera = RED ("Dotty is recording"). When mic is ACTIVELY STREAMING audio
+// to the cloud (vs local-only wake-word listening), the green pulses at
+// ~1 Hz instead of staying steady — same color, different pattern, so
+// "your voice is leaving the device" reads as a distinct alarm without
+// needing a second color. Pre-quantized to RGB565 (5/6/5).
+//
+// Camera-pulsing-when-uploading is planned but deferred until step 4-5
+// adds the firmware-side local-vs-upload distinction. Today camera shows
+// steady red whenever any consumer is reading frames.
+//
+// Distinct from existing UI palette: left-ring chat states use the same
+// green during LISTENING — that's intentional reinforcement (both say
+// "Dotty is listening"). Spatial separation (left vs right ring) keeps
+// them readable.
+constexpr uint8_t kMicR         = 0;    // green: mic on
+constexpr uint8_t kMicG         = 200;
+constexpr uint8_t kMicB         = 0;
 
-constexpr uint8_t kMicStreamR   = 200;
-constexpr uint8_t kMicStreamG   = 200;
-constexpr uint8_t kMicStreamB   = 200;
-
-constexpr uint8_t kCameraR      = 200;
+constexpr uint8_t kCameraR      = 200;  // red: camera on
 constexpr uint8_t kCameraG      = 0;
 constexpr uint8_t kCameraB      = 0;
+
+// 1 Hz pulse period. update() runs every ~10 ms; a 1000 ms period with
+// 50% duty cycle means the LED is lit for ~500 ms, dark for ~500 ms.
+constexpr uint32_t kPulsePeriodMs = 1000;
 
 enum class MicState : uint8_t {
     Off    = 0,  // codec input device closed
@@ -119,6 +133,13 @@ public:
     // Cheap (two setRgbColor + one refreshRgb).
     void update();
 
+    // Boot-time self-test: cycles BOTH privacy pixels through the full
+    // palette (amber -> cyan-blue -> red -> off, ~500 ms each, ~2 s total)
+    // so the operator can confirm at power-on that both LEDs and the I2C
+    // bus to the PY32 are alive. Inhibits update() reconciliation for the
+    // duration so chat-state animations cannot overpaint the test pattern.
+    void runBootSelfTest();
+
 private:
     PrivacyLeds() = default;
 
@@ -134,6 +155,7 @@ private:
 
     std::atomic<MicState>    _mic_state    {MicState::Off};
     std::atomic<CameraState> _camera_state {CameraState::Off};
+    std::atomic<bool>        _inhibit_update {false};
 };
 
 }  // namespace stackchan::privacy

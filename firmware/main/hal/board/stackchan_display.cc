@@ -538,8 +538,6 @@ bool hal_bridge::is_xiaozhi_ready()
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
 {
-    // ESP_LOGE(TAG, "SetStatus: %s", status);
-
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
         ESP_LOGE(TAG, "Avatar is invalid");
@@ -669,10 +667,16 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = stackchan.addModifier(
                 std::make_unique<IdleExpressionModifier>());
         }
-        // Cyan right LED = "ready, watching for you" in standby. Stays
-        // IDLE-gated even though face_tracking is now always alive — the
-        // LED communicates "open to greeting", not "tracking running".
-        stackchan.rightNeonLight().setColor(0, 168, 168);
+        // Right ring middle pixels (8-10) stay dark in idle. The previous
+        // always-on cyan "face-detection mode active" indicator was visual
+        // noise — face detector is now permanently on (since fix `8d74dd7`
+        // decoupled it from chat state) so a continuous indicator carried
+        // no actionable signal. The privacy LEDs at indices 6 and 11 already
+        // give the family the "is the camera on?" answer (red on index 11).
+        // Future: tie indices 8-10 to face_tracking state (green when a
+        // face is actively being tracked) — that's the "is Dotty looking
+        // at me right now?" signal worth lighting.
+        stackchan.rightNeonLight().setColor(0, 0, 0);
 
         // Phase 1.2: register the ambient sound localizer once. Its
         // callback fires from the audio input task whenever stereo

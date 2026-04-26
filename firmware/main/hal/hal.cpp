@@ -37,6 +37,14 @@ void Hal::init()
     xiaozhi_mcp_init();
     head_touch_init();
     io_expander_init();
+    // Privacy LED boot self-test: cycles indices 6+7 through amber ->
+    // cyan-blue -> red -> off (~2 s) so the family can confirm at power-
+    // on that both privacy indicators + the I2C bus to the PY32 are alive.
+    // MUST run after io_expander_init() — setRgbColor is a no-op until the
+    // expander is up. _stackchan_update_task hasn't started yet (that's in
+    // startXiaozhi() which runs after Hal::init() returns) so the test
+    // can't be clobbered by the tick.
+    stackchan::privacy::PrivacyLeds::getInstance().runBootSelfTest();
     rtc_init();
     imu_init();
     servo_init();

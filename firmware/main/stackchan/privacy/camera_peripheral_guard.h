@@ -3,38 +3,37 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * RAII guard for the camera peripheral.
+ * RAII refcount guard for the camera peripheral.
  *
- * IMPORTANT — current scope is INTENT-LAYER ONLY:
+ * Acquiring a guard tells the privacy subsystem "a consumer is reading
+ * camera frames" — the V4L2 stream is asserted (VIDIOC_STREAMON via
+ * StackChanCamera::startStreaming() on the 0→1 refcount transition) and
+ * the red privacy LED lights. Releasing the guard decrements the
+ * refcount; on 1→0 the stream is torn down (VIDIOC_STREAMOFF) and the
+ * LED extinguishes.
  *
- *   In an ideal world this guard would call VIDIOC_STREAMON in its
- *   constructor and VIDIOC_STREAMOFF in its destructor, and the LED
- *   would only light when the V4L2 driver is actually feeding DMA
- *   buffers. That is the L362 fix in tasks.md.
+ * Two concurrent consumers (face detector + MCP take_photo) compose
+ * cleanly: the second-in finds a hot stream and just bumps the count;
+ * the second-out leaves the stream up for the first-in. The privacy
+ * indicator therefore tracks "any consumer is active" rather than any
+ * single code path.
  *
- *   The current ESP-DL face-detect pipeline (FaceDetector::processFrame)
- *   assumes the camera streams permanently after init — it just
- *   dequeues / requeues mmap buffers via VIDIOC_DQBUF / VIDIOC_QBUF.
- *   Adding STREAMON/STREAMOFF around every detection frame would
- *   require either:
- *     (a) restarting the V4L2 stream every ~200 ms (frame rate hit +
- *         re-init of ISP autoexpose),
- *     (b) switching face-detect to an explicit "begin / end stream"
- *         lifecycle so STREAMON is asserted once when detection is
- *         enabled and STREAMOFF is asserted once when it is disabled.
+ * Design invariants:
  *
- *   Option (b) is the right answer but is DEFERRED — see PRIVACY_LEDS.md.
+ *   - Construction may block for up to ~5 s on the first acquire after
+ *     boot while the ISP autoexposure warmup runs. Subsequent acquires
+ *     return immediately.
+ *   - Non-movable, non-copyable. Guard must be constructed and destroyed
+ *     on the same FreeRTOS task (recursive mutex enforces this).
+ *   - The mutators on PrivacyLeds (setCameraState) are friend-restricted
+ *     to this class — a compromised MCP server cannot drive the LED
+ *     without also driving the V4L2 stream.
  *
- *   For now, this guard only updates PrivacyLeds::CameraState. It is
- *   wired into:
- *     - StackChanCamera::Capture (the take_photo path) — guard lives
- *       for the duration of the capture
- *     - StackChanCamera::StreamCaptures (the face-detect path) — guard
- *       lives for the duration of one capture cycle
- *
- *   Once option (b) lands, the constructor here will issue the
- *   STREAMON ioctl directly and the destructor will issue STREAMOFF.
- *   At that point the LED becomes hardware-guaranteed.
+ * Wired into:
+ *   - StackChanCamera::Capture (MCP take_photo path) — guard scoped to
+ *     the entire capture.
+ *   - FaceDetector::taskEntry — guard scoped to the entire _enabled
+ *     window so the LED stays steady across many processFrame cycles.
  */
 #pragma once
 
@@ -44,15 +43,8 @@ namespace stackchan::privacy {
 
 class CameraPeripheralGuard {
 public:
-    CameraPeripheralGuard()
-    {
-        PrivacyLeds::getInstance().setCameraState(CameraState::Active);
-    }
-
-    ~CameraPeripheralGuard()
-    {
-        PrivacyLeds::getInstance().setCameraState(CameraState::Off);
-    }
+    CameraPeripheralGuard();
+    ~CameraPeripheralGuard();
 
     CameraPeripheralGuard(const CameraPeripheralGuard&)            = delete;
     CameraPeripheralGuard& operator=(const CameraPeripheralGuard&) = delete;

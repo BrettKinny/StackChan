@@ -5,6 +5,8 @@
  */
 #include "hal.h"
 #include <stackchan/stackchan.h>
+#include <stackchan/privacy/camera_peripheral_guard.h>
+#include <memory>
 #include "board/hal_bridge.h"
 #include <mooncake.h>
 #include <mooncake_log.h>
@@ -209,6 +211,14 @@ public:
                 case DataType::StartCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Start Camera Stream");
                     GetHAL().setCameraLedActive(true);
+                    // Privacy LED step 4: hold a CameraPeripheralGuard
+                    // for the entire avatar-stream lifetime. This brings
+                    // the V4L2 stream up via the same refcount path as
+                    // FaceDetector / Capture, so simultaneous consumers
+                    // keep the stream alive without churn.
+                    if (!_camera_guard) {
+                        _camera_guard = std::make_unique<stackchan::privacy::CameraPeripheralGuard>();
+                    }
                     setStreamingEnabled(true);
                     _websocket->Send("camera stream started");
                     break;
@@ -217,6 +227,7 @@ public:
                     ESP_LOGI(_tag.c_str(), "Stop Camera Stream");
                     GetHAL().setCameraLedActive(false);
                     setStreamingEnabled(false);
+                    _camera_guard.reset();
                     _websocket->Send("camera stream stopped");
                     break;
                 }
@@ -434,6 +445,11 @@ private:
     uint32_t _last_heartbeat_time    = 0;
     bool _is_streaming               = false;
     bool _is_video_mode              = false;
+    // Held while the WS peer has the avatar camera stream open. Refcount
+    // composes with FaceDetector + Capture guards so the V4L2 stream
+    // stays up across all consumers and the privacy LED tracks "any
+    // consumer is reading frames" rather than any single code path.
+    std::unique_ptr<stackchan::privacy::CameraPeripheralGuard> _camera_guard;
     std::mutex _mutex;
     std::queue<ReceivedMessage> _msg_queue;
 

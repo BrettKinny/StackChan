@@ -102,6 +102,12 @@ void LeftNeonLight::refresh_rgb_impl()
 
 void RightNeonLight::set_rgb_color_impl(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
 {
+    // Local 0 and 5 map to global 6 (mic) and 11 (camera), owned by
+    // PrivacyLeds. Skipping silently here keeps animation sweeps from
+    // spamming the Hal privacy guard with rejections every frame.
+    if (index == 0 || index == 5) {
+        return;
+    }
     GetHAL().setRgbColor(index + 6, r, g, b);
 }
 

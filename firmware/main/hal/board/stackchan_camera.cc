@@ -327,55 +327,19 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
         }
     }
 
-    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
-        close(video_fd_);
-        video_fd_      = -1;
-        sensor_format_ = 0;
-        return;
-    }
-
-#ifdef CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
-    // 当启用 ISP 时，ISP 需要一些照片来初始化参数，因此开启后后台拍摄5s照片并丢弃
-    xTaskCreate(
-        [](void* arg) {
-            Esp32Camera* self      = static_cast<Esp32Camera*>(arg);
-            uint16_t capture_count = 0;
-            TickType_t start       = xTaskGetTickCount();
-            TickType_t duration    = 5000 / portTICK_PERIOD_MS;  // 5s
-            while ((xTaskGetTickCount() - start) < duration) {
-                struct v4l2_buffer buf = {};
-                buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory             = V4L2_MEMORY_MMAP;
-                if (ioctl(self->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
-                    vTaskDelay(10 / portTICK_PERIOD_MS);
-                    continue;
-                }
-                if (ioctl(self->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_QBUF failed during init");
-                }
-                capture_count++;
-            }
-            ESP_LOGI(TAG, "Camera init success, captured %d frames in %dms", capture_count,
-                     (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
-            self->streaming_on_ = true;
-            vTaskDelete(NULL);
-        },
-        "CameraInitTask", 4096, this, 5, nullptr);
-#else
-    ESP_LOGI(TAG, "Camera init success");
-    streaming_on_ = true;
-#endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
+    // Privacy LED step 4: do NOT issue VIDIOC_STREAMON here. The
+    // CameraPeripheralGuard (face detector enable, MCP take_photo, etc.)
+    // is now the only path that turns the V4L2 stream on. The camera is
+    // initialised but quiescent until a consumer needs it; the red
+    // privacy LED then becomes a true peripheral indicator.
+    ESP_LOGI(TAG, "Camera init success (stream off; awaiting first guard)");
 }
 
 StackChanCamera::~StackChanCamera()
 {
-    if (streaming_on_ && video_fd_ >= 0) {
-        int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
-    }
+    // Defensively tear the stream down via the standard path so the
+    // peripheral state matches expectations on shutdown.
+    stopStreaming();
     for (auto& b : mmap_buffers_) {
         if (b.start && b.length) {
             munmap(b.start, b.length);
@@ -397,11 +361,18 @@ void StackChanCamera::SetExplainUrl(const std::string& url, const std::string& t
 
 bool StackChanCamera::Capture()
 {
+    // Privacy LED step 3: stamp the moment we begin a capture, regardless
+    // of whether arbitration succeeds. The bridge polls this via MCP
+    // get_privacy_state to confirm the camera was exercised after a
+    // take_photo call. esp_log_timestamp() returns ms since boot
+    // (uint32_t, wraps every ~49 days — informational use only).
+    last_capture_ts_ms_ = esp_log_timestamp();
+
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
 
-    if (!streaming_on_ || video_fd_ < 0) {
+    if (video_fd_ < 0) {
         return false;
     }
 
@@ -425,12 +396,20 @@ bool StackChanCamera::Capture()
         ~MotionPauseGuard() { m.setModifyLock(false); }
     } motion_pause_guard{ ::GetStackChan().motion() };
 
-    // Layer 1 privacy LED. We are about to dequeue 3 frames from the V4L2
-    // driver — the camera is actively producing data for us. Light the
-    // indicator for the duration of the capture. See
-    // stackchan/privacy/PRIVACY_LEDS.md for why this currently tracks
-    // consumer activity rather than VIDIOC_STREAMON.
+    // Layer 1 privacy LED + V4L2 stream lifecycle. The refcounted guard
+    // brings the stream up on the 0→1 transition (synchronous; blocks
+    // ~5 s on first acquire after boot for ISP autoexposure warmup) and
+    // tears it down on 1→0. Composes with the FaceDetector guard so two
+    // simultaneous consumers keep the stream and LED steady across the
+    // overlap.
     stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
+    if (!streaming_on_) {
+        // startStreaming() failed inside the guard ctor (logged there).
+        // The guard dtor will still flip the LED back off when this
+        // function returns; the arbiter releases via its own guard.
+        ESP_LOGE(TAG, "Capture aborted — stream not up after guard acquire");
+        return false;
+    }
 
     // Play shutter sfx
     hal_bridge::app_play_sound(OGG_CAMERA_SHUTTER);
@@ -881,6 +860,84 @@ bool StackChanCamera::Capture()
     return true;
 }
 
+bool StackChanCamera::isStreaming() const
+{
+    // V4L2 truth, flipped by startStreaming()/stopStreaming(). The
+    // refcounted CameraPeripheralGuard is the only legitimate caller of
+    // those, so this tracks the actual VIDIOC_STREAMON state.
+    return streaming_on_;
+}
+
+bool StackChanCamera::startStreaming()
+{
+    if (streaming_on_) {
+        // Idempotent: already streaming. Refcounted guard composes
+        // multiple consumers; only the 0→1 transition reaches this body.
+        return true;
+    }
+    if (video_fd_ < 0) {
+        // Constructor failed to open the V4L2 device. Cannot recover.
+        return false;
+    }
+
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
+        return false;
+    }
+
+#ifdef CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
+    // 当启用 ISP 时，ISP 需要一些照片来初始化参数，因此开启后拍摄5s照片并丢弃
+    // Synchronous: caller blocks until the warmup completes so on return
+    // the stream is ready to dequeue. With ISP, this is ~5 s on first
+    // acquire after boot. Subsequent acquires hit the streaming_on_
+    // short-circuit above and return immediately.
+    {
+        uint16_t capture_count = 0;
+        TickType_t start       = xTaskGetTickCount();
+        TickType_t duration    = 5000 / portTICK_PERIOD_MS;  // 5s
+        while ((xTaskGetTickCount() - start) < duration) {
+            struct v4l2_buffer buf = {};
+            buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory             = V4L2_MEMORY_MMAP;
+            if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+                ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
+                vTaskDelay(10 / portTICK_PERIOD_MS);
+                continue;
+            }
+            if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+                ESP_LOGE(TAG, "VIDIOC_QBUF failed during init");
+            }
+            capture_count++;
+        }
+        ESP_LOGI(TAG, "Stream up, ISP warmed in %dms (%d frames)",
+                 static_cast<int>((xTaskGetTickCount() - start) * portTICK_PERIOD_MS),
+                 capture_count);
+    }
+#else
+    ESP_LOGI(TAG, "Stream up (no ISP)");
+#endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
+
+    streaming_on_ = true;
+    return true;
+}
+
+void StackChanCamera::stopStreaming()
+{
+    if (!streaming_on_ || video_fd_ < 0) {
+        return;
+    }
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMOFF, &type) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_STREAMOFF failed");
+        // Fall through and clear the flag anyway so the next
+        // startStreaming() doesn't short-circuit on a stale truth.
+    } else {
+        ESP_LOGI(TAG, "Stream down");
+    }
+    streaming_on_ = false;
+}
+
 bool StackChanCamera::StreamCaptures()
 {
     if (encoder_thread_.joinable()) {
@@ -891,12 +948,12 @@ bool StackChanCamera::StreamCaptures()
         return false;
     }
 
-    // Layer 1 privacy LED. One face-detect cycle is reading a frame; the
-    // guard lifetime is one StreamCaptures() call. With face_detector
-    // running at ~20 Hz this means the LED is solidly on whenever
-    // detection is enabled. See stackchan/privacy/PRIVACY_LEDS.md
-    // ("Deferred work") for the proper STREAMON-bound version.
-    stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
+    // Privacy LED guard moved up to FaceDetector::processFrame() so it
+    // wraps both the StreamCaptures() capture step (~50 ms) AND the
+    // ESP-DL inference (~280 ms). The previous per-StreamCaptures scope
+    // visibly blinked the red privacy LED at the inference cadence
+    // (capture-on, inference-off, capture-on, ...). Step 4-5 replaces
+    // both with a refcounted CameraPeripheralGuard tied to STREAMON.
 
     {
         struct v4l2_buffer buf = {};

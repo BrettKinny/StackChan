@@ -77,6 +77,7 @@ private:
     i2c_master_dev_handle_t _i2c_dev;
     uint8_t _addr;
     bool _initialized;
+    uint8_t _led_cfg_cached = 0;  // last value written to REG_LED_CFG (low 6 bits = count)
 
     esp_err_t writeRegister8(uint8_t reg, uint8_t value);
     uint8_t readRegister8(uint8_t reg);
