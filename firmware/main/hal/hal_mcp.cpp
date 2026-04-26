@@ -144,10 +144,12 @@ void Hal::xiaozhi_mcp_init()
     mcp_server.AddTool(
         "self.robot.get_privacy_state",
         "READ-ONLY. Returns BOTH the LED intent AND the underlying peripheral truth. "
-        "mic = 'off' | 'local' | 'streaming' (off = mic ADC closed; local = ADC on, only feeding "
-        "wake-word/VAD locally; streaming = ADC on AND opus frames being sent to the server). "
-        "camera = 'off' | 'streaming' (off = no consumer reading frames; streaming = face-detect "
-        "or take_photo is currently dequeuing camera frames). "
+        "mic = 'off' | 'local' | 'wan_bound' (off = mic ADC closed; local = ADC on but audio is "
+        "staying on-device; wan_bound = ADC on AND audio is crossing the LAN boundary to a cloud "
+        "ASR / LLM — pulses to alert the operator). "
+        "camera = 'off' | 'active' | 'uploading' (off = no consumer reading frames; active = a "
+        "consumer is dequeuing frames locally; uploading = frames are crossing the LAN boundary "
+        "to a cloud vision API — pulses to alert the operator). "
         "mic_peripheral_open = true iff the audio codec input device is currently open. "
         "camera_peripheral_streaming = true iff the camera driver is in a streamable state "
         "(placeholder true-always until step 4-5 wires V4L2 truth). "
@@ -157,14 +159,15 @@ void Hal::xiaozhi_mcp_init()
         [this](const PropertyList& properties) -> ReturnValue {
             const char* mic_str = "off";
             switch (privacy::PrivacyLeds::getInstance().micState()) {
-                case privacy::MicState::Off:    mic_str = "off"; break;
-                case privacy::MicState::Local:  mic_str = "local"; break;
-                case privacy::MicState::Stream: mic_str = "streaming"; break;
+                case privacy::MicState::Off:      mic_str = "off"; break;
+                case privacy::MicState::Local:    mic_str = "local"; break;
+                case privacy::MicState::WanBound: mic_str = "wan_bound"; break;
             }
             const char* cam_str = "off";
             switch (privacy::PrivacyLeds::getInstance().cameraState()) {
-                case privacy::CameraState::Off:    cam_str = "off"; break;
-                case privacy::CameraState::Active: cam_str = "streaming"; break;
+                case privacy::CameraState::Off:       cam_str = "off"; break;
+                case privacy::CameraState::Active:    cam_str = "active"; break;
+                case privacy::CameraState::Uploading: cam_str = "uploading"; break;
             }
 
             // Peripheral-level truth. Independent of LED intent so the

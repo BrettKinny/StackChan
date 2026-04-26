@@ -6,7 +6,6 @@
 #include "privacy_leds.h"
 
 #include <hal/hal.h>
-#include <application.h>
 #include <esp_log.h>          // esp_log_timestamp() for pulse phase
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -34,51 +33,69 @@ void PrivacyLeds::update()
     }
     auto& hal = GetHAL();
 
-    // Reconcile Local <-> Stream while the mic is on.
+    // Pulse derivation: 1 Hz period, 50% duty cycle, derived from
+    // millis-since-boot so all pulsing pixels stay phase-locked (looks
+    // intentional rather than glitchy).
+    const uint32_t now_ms   = esp_log_timestamp();
+    const bool     pulse_on = (now_ms % kPulsePeriodMs) < (kPulsePeriodMs / 2);
+
+    // Reconcile WAN-bound flags against the failsafe timeout, and against
+    // the underlying peripheral state.
     //
-    // The MicPeripheralGuard ctor sets the state to Local when the codec
-    // input device opens. But the wake-word -> voice-processing transition
-    // does NOT reopen the codec — it just flips the AS_EVENT_AUDIO_PROCESSOR
-    // bit while the existing codec session continues. So while the guard is
-    // alive (= mic ADC actually on), we re-derive Local vs Stream from the
-    // audio service event group on every tick. This keeps the LED in sync
-    // without needing a hook in the upstream xiaozhi audio_service.cc.
+    // The bridge tells us when an upload is in flight. We never trust the
+    // flag indefinitely: if no upload_end arrives within kWanBoundTimeoutMs,
+    // we drop back. We also never let WanBound / Uploading outlive the
+    // peripheral being on — a flag set while the mic is Off is a no-op,
+    // and as soon as the corresponding base state is Off the flag clears.
     //
-    // CRITICAL: this only ever upgrades / downgrades between Local and
-    // Stream. We never flip Off -> on here; that path is the guard ctor.
+    // Old design (audio-service-derived Local <-> Stream reconcile from
+    // IsAudioProcessorRunning) was removed: it conflated "audio service is
+    // ticking" with "audio leaving the LAN", and the LED is supposed to
+    // mean the latter. The bridge has the only reliable view.
     {
-        MicState s = _mic_state.load(std::memory_order_acquire);
-        if (s != MicState::Off) {
-            // The Application singleton is alive by the time anything calls
-            // EnableInput (which is what creates the guard), so this is safe.
-            bool streaming = Application::GetInstance().GetAudioService().IsAudioProcessorRunning();
-            MicState desired = streaming ? MicState::Stream : MicState::Local;
-            if (desired != s) {
-                _mic_state.store(desired, std::memory_order_release);
+        if (_mic_wan_bound.load(std::memory_order_acquire)) {
+            uint32_t ts = _mic_wan_bound_ts_ms.load(std::memory_order_acquire);
+            if ((now_ms - ts) > kWanBoundTimeoutMs) {
+                _mic_wan_bound.store(false, std::memory_order_release);
+                mclog::tagWarn(_tag,
+                    "mic WAN-bound flag timed out ({} ms with no upload_end)",
+                    kWanBoundTimeoutMs);
+            }
+        }
+        if (_camera_uploading.load(std::memory_order_acquire)) {
+            uint32_t ts = _camera_uploading_ts_ms.load(std::memory_order_acquire);
+            if ((now_ms - ts) > kWanBoundTimeoutMs) {
+                _camera_uploading.store(false, std::memory_order_release);
+                mclog::tagWarn(_tag,
+                    "camera upload flag timed out ({} ms with no upload_end)",
+                    kWanBoundTimeoutMs);
             }
         }
     }
 
+    // Derive the displayed mic state from the base peripheral state plus
+    // the WAN-bound flag. WanBound only ever applies on top of Local;
+    // never elevate Off → WanBound (peripheral must actually be open).
+    MicState mic_base = _mic_state.load(std::memory_order_acquire);
+    MicState mic_disp = mic_base;
+    if (mic_base == MicState::Local && _mic_wan_bound.load(std::memory_order_acquire)) {
+        mic_disp = MicState::WanBound;
+    }
+
     // Mic indicator at global index 6. Green when on; PULSING green when
-    // streaming opus frames to the server (your voice is leaving the
-    // device). Uses the friend-only writer so the public Hal::setRgbColor
-    // guard (which rejects 6/7) doesn't fire.
-    //
-    // Pulse derivation: 1 Hz period, 50% duty cycle, derived from
-    // millis-since-boot so all pulsing pixels stay phase-locked (looks
-    // intentional rather than glitchy).
-    const uint32_t now_ms     = esp_log_timestamp();
-    const bool     pulse_on   = (now_ms % kPulsePeriodMs) < (kPulsePeriodMs / 2);
-    switch (_mic_state.load(std::memory_order_acquire)) {
+    // audio is crossing the LAN (WanBound). Uses the friend-only writer
+    // so the public Hal::setRgbColor guard (which rejects 6/11) doesn't
+    // fire.
+    switch (mic_disp) {
         case MicState::Off:
             hal.setRgbColor_privacy_only(kMicLedIndex, 0, 0, 0);
             break;
         case MicState::Local:
             hal.setRgbColor_privacy_only(kMicLedIndex, kMicR, kMicG, kMicB);
             break;
-        case MicState::Stream:
+        case MicState::WanBound:
             // Same green hue, blink at 1 Hz so "data leaving" is a
-            // distinct alarm without needing a second color.
+            // distinct alarm without needing a second colour.
             hal.setRgbColor_privacy_only(kMicLedIndex,
                 pulse_on ? kMicR : 0,
                 pulse_on ? kMicG : 0,
@@ -86,19 +103,51 @@ void PrivacyLeds::update()
             break;
     }
 
-    // Camera indicator at global index 7. Steady red when any consumer
-    // is reading frames. Pulsing-when-uploading is planned but requires
-    // a firmware-side local-vs-upload distinction (deferred to step 4-5).
-    switch (_camera_state.load(std::memory_order_acquire)) {
+    // Same derivation for the camera: Uploading only on top of Active.
+    CameraState cam_base = _camera_state.load(std::memory_order_acquire);
+    CameraState cam_disp = cam_base;
+    if (cam_base == CameraState::Active && _camera_uploading.load(std::memory_order_acquire)) {
+        cam_disp = CameraState::Uploading;
+    }
+
+    // Camera indicator at global index 11. Steady red when any consumer
+    // is reading frames; PULSING red when frames are crossing the LAN.
+    switch (cam_disp) {
         case CameraState::Off:
             hal.setRgbColor_privacy_only(kCameraLedIndex, 0, 0, 0);
             break;
         case CameraState::Active:
             hal.setRgbColor_privacy_only(kCameraLedIndex, kCameraR, kCameraG, kCameraB);
             break;
+        case CameraState::Uploading:
+            hal.setRgbColor_privacy_only(kCameraLedIndex,
+                pulse_on ? kCameraR : 0,
+                pulse_on ? kCameraG : 0,
+                pulse_on ? kCameraB : 0);
+            break;
     }
 
     hal.refreshRgb();
+}
+
+void PrivacyLeds::setMicWanBound(bool active)
+{
+    if (active) {
+        _mic_wan_bound_ts_ms.store(esp_log_timestamp(), std::memory_order_release);
+        _mic_wan_bound.store(true, std::memory_order_release);
+    } else {
+        _mic_wan_bound.store(false, std::memory_order_release);
+    }
+}
+
+void PrivacyLeds::setCameraUploading(bool active)
+{
+    if (active) {
+        _camera_uploading_ts_ms.store(esp_log_timestamp(), std::memory_order_release);
+        _camera_uploading.store(true, std::memory_order_release);
+    } else {
+        _camera_uploading.store(false, std::memory_order_release);
+    }
 }
 
 void PrivacyLeds::runBootSelfTest()

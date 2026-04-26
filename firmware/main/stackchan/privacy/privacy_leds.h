@@ -10,21 +10,26 @@
  *   Right ring (global LED indices 6..11) is divided as:
  *     index 6  -> MIC privacy indicator
  *                  - off              -> MIC_OFF      (mic ADC closed)
- *                  - dim white        -> MIC_LOCAL    (mic ADC open, only fed
+ *                  - steady green     -> MIC_LOCAL    (mic ADC open, only fed
  *                                                      to local wake-word /
- *                                                      VAD; no WS uplink)
- *                  - bright white     -> MIC_STREAM   (mic ADC open AND WS
- *                                                      audio processor is
- *                                                      streaming opus frames
- *                                                      to xiaozhi server)
- *     index 7  -> CAMERA privacy indicator
- *                  - off              -> CAMERA_OFF   (no consumer of camera
- *                                                      frames)
- *                  - bright red       -> CAMERA_ACTIVE (face-detect or
- *                                                       Capture() actively
- *                                                       reading frames)
+ *                                                      VAD; no WAN uplink)
+ *                  - pulsing green    -> MIC_WAN_BOUND (mic ADC open AND audio
+ *                                                       is crossing the LAN
+ *                                                       boundary — i.e. opus
+ *                                                       being uploaded to a
+ *                                                       cloud ASR / LLM)
+ *     index 11 -> CAMERA privacy indicator
+ *                  - off              -> CAMERA_OFF      (no consumer of
+ *                                                         camera frames)
+ *                  - steady red       -> CAMERA_ACTIVE   (face-detect or
+ *                                                         Capture() actively
+ *                                                         reading frames
+ *                                                         locally — no upload)
+ *                  - pulsing red      -> CAMERA_UPLOADING (frames are being
+ *                                                          shipped to a cloud
+ *                                                          vision API)
  *
- *   Indices 8..11 are NOT touched by this module — they remain owned by the
+ *   Indices 7..10 are NOT touched by this module — they remain owned by the
  *   chat-state / face-detect ring animations.
  *
  * Why this design:
@@ -67,8 +72,9 @@
 namespace stackchan::privacy {
 
 // LED ring indices reserved for Layer 1 privacy indicators.
-// Right ring spans global 6..11; we take 6 and 7. Indices 8..11 stay
-// available to the existing chat-state ring animations.
+// Right ring spans global 6..11; we take 6 (top) and 11 (bottom).
+// Indices 7..10 stay available to the existing chat-state ring
+// animations.
 // Privacy pixels at OPPOSITE ENDS of the right ring (was 6 + 7, both at
 // the top — visually crowded). Now top + bottom, leaving indices 7-10 in
 // the middle free for future indicators (cloud-connection, smart-mode
@@ -77,15 +83,20 @@ constexpr uint8_t kMicLedIndex    = 6;   // global; top of right ring
 constexpr uint8_t kCameraLedIndex = 11;  // global; bottom of right ring
 
 // Universal recording-light convention. Mic = GREEN ("Dotty is listening"),
-// Camera = RED ("Dotty is recording"). When mic is ACTIVELY STREAMING audio
-// to the cloud (vs local-only wake-word listening), the green pulses at
-// ~1 Hz instead of staying steady — same color, different pattern, so
-// "your voice is leaving the device" reads as a distinct alarm without
-// needing a second color. Pre-quantized to RGB565 (5/6/5).
+// Camera = RED ("Dotty is recording"). When the corresponding peripheral
+// data is crossing the LAN boundary (mic audio uploading to cloud ASR;
+// camera frames uploading to a vision API), the LED pulses at ~1 Hz
+// instead of staying steady — same hue, different pattern, so "data is
+// leaving the device" reads as a distinct alarm without needing a second
+// colour. Pre-quantized to RGB565 (5/6/5).
 //
-// Camera-pulsing-when-uploading is planned but deferred until step 4-5
-// adds the firmware-side local-vs-upload distinction. Today camera shows
-// steady red whenever any consumer is reading frames.
+// The two pulsing states (mic WanBound, camera Uploading) are driven by
+// the bridge over the avatar WS protocol: it knows when an upload is in
+// flight and we don't. The bridge sends `privacy.upload_start` /
+// `upload_end` events and PrivacyLeds clears the flag automatically
+// after kWanBoundTimeoutMs if no end arrives (defensive against bridge
+// crash mid-upload — never want the LED stuck pulsing while no data is
+// actually leaving).
 //
 // Distinct from existing UI palette: left-ring chat states use the same
 // green during LISTENING — that's intentional reinforcement (both say
@@ -103,17 +114,31 @@ constexpr uint8_t kCameraB      = 0;
 // 50% duty cycle means the LED is lit for ~500 ms, dark for ~500 ms.
 constexpr uint32_t kPulsePeriodMs = 1000;
 
+// Failsafe drop-back interval for the WAN-bound flag. If the bridge
+// sends `upload_start` and never sends `upload_end` (crash, network
+// drop, etc.), the LED will revert from pulsing to steady after this
+// many ms. Two seconds is comfortably longer than any expected single-
+// shot vision API call (median ~700 ms, p99 ~1.5 s) but short enough
+// that a stuck-pulsing LED is never visibly wrong for long.
+constexpr uint32_t kWanBoundTimeoutMs = 2000;
+
 enum class MicState : uint8_t {
-    Off    = 0,  // codec input device closed
-    Local  = 1,  // ADC on, only feeds local wake-word / VAD
-    Stream = 2,  // ADC on, audio processor pushing opus frames to server
+    Off      = 0,  // codec input device closed
+    Local    = 1,  // ADC on, audio is staying on-device (wake-word, VAD,
+                   // local-only ASR if/when we have one)
+    WanBound = 2,  // ADC on AND opus frames are crossing the LAN boundary
+                   // to a cloud ASR / LLM — pulses to alert the operator
 };
 
 enum class CameraState : uint8_t {
-    Off    = 0,  // VIDIOC_STREAMON in driver but no consumer reading frames
-                 // (see PRIVACY_LEDS.md for the L362 STREAMOFF discussion)
-    Active = 1,  // a consumer (face_detector StreamCaptures or Capture()) is
-                 // actively dequeuing frames
+    Off       = 0,  // VIDIOC_STREAMON in driver but no consumer reading
+                    // frames (see PRIVACY_LEDS.md for the L362 STREAMOFF
+                    // discussion)
+    Active    = 1,  // a consumer (face_detector StreamCaptures or Capture())
+                    // is actively dequeuing frames locally
+    Uploading = 2,  // frames (or a derivative — JPEG, embedding, etc.) are
+                   // crossing the LAN boundary to a cloud vision API —
+                   // pulses to alert the operator
 };
 
 class PrivacyLeds {
@@ -132,6 +157,23 @@ public:
     // run, so we visibly override their colour at the privacy indices.
     // Cheap (two setRgbColor + one refreshRgb).
     void update();
+
+    // Bridge-driven WAN-bound flag controls. The bridge tells us when an
+    // upload is in flight (it knows; we don't have a per-byte hook into
+    // either the audio service's WS payloads or the cloud vision HTTP
+    // calls). These methods are SAFE to call from any context — they
+    // never enable a privacy LED from Off; they only upgrade an
+    // already-Local mic to WanBound (or already-Active camera to
+    // Uploading). If the corresponding peripheral is currently Off, the
+    // flag is recorded but has no visible effect, and is automatically
+    // cleared the next time update() reconciles state.
+    //
+    // The flag is also auto-cleared kWanBoundTimeoutMs after the most
+    // recent setMicWanBound(true) / setCameraUploading(true) call, even
+    // if no setX(false) ever arrives — defensive against a bridge crash
+    // mid-upload that would otherwise leave the LED pulsing forever.
+    void setMicWanBound(bool active);
+    void setCameraUploading(bool active);
 
     // Boot-time self-test: cycles BOTH privacy pixels through the full
     // palette (amber -> cyan-blue -> red -> off, ~500 ms each, ~2 s total)
@@ -156,6 +198,14 @@ private:
     std::atomic<MicState>    _mic_state    {MicState::Off};
     std::atomic<CameraState> _camera_state {CameraState::Off};
     std::atomic<bool>        _inhibit_update {false};
+
+    // WAN-bound flags + their failsafe timestamps. Set by the bridge over
+    // the avatar WS protocol; consumed by update() to decide whether to
+    // pulse the corresponding privacy LED.
+    std::atomic<bool>     _mic_wan_bound       {false};
+    std::atomic<uint32_t> _mic_wan_bound_ts_ms {0};
+    std::atomic<bool>     _camera_uploading       {false};
+    std::atomic<uint32_t> _camera_uploading_ts_ms {0};
 };
 
 }  // namespace stackchan::privacy
