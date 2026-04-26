@@ -155,9 +155,18 @@ private:
  * @brief
  *
  */
+// Forward decl so Hal can name PrivacyLeds as a friend (privacy_leds.h
+// is included in hal.cpp, not the header, to avoid include ordering pain).
+namespace stackchan { namespace privacy { class PrivacyLeds; } }
+
 class Hal {
 public:
     void init();
+
+    // PrivacyLeds is the SOLE legitimate writer of indices 6 and 7 (the
+    // mic + camera privacy indicators). It bypasses the public setRgbColor
+    // guard via setRgbColor_privacy_only(), declared in the private section.
+    friend class stackchan::privacy::PrivacyLeds;
 
     /* --------------------------------- System --------------------------------- */
     void delay(std::uint32_t ms);
@@ -207,6 +216,8 @@ public:
     uitk::Signal<HeadPetGesture> onHeadPetGesture;
 
     /* ----------------------------------- RGB ---------------------------------- */
+    // Public RGB writer. REJECTS indices 6 and 7 (privacy-reserved); use
+    // the PrivacyLeds API for those. Other indices pass through unchanged.
     void setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
     void showRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void refreshRgb();
@@ -287,6 +298,11 @@ private:
     void io_expander_init();
     void imu_init();
     void rtc_init();
+
+    // Friend-only LED writer for the privacy indicator pixels (indices 6 and 7).
+    // Bypasses the public-API guard. ONLY PrivacyLeds may call this — the
+    // friend-class declaration above enforces that at link time.
+    void setRgbColor_privacy_only(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
 };
 
 Hal& GetHAL();

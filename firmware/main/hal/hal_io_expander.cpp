@@ -69,6 +69,24 @@ void Hal::setServoPowerEnabled(bool enabled)
 
 void Hal::setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
 {
+    // Indices 6 and 7 are reserved for the Layer-1 privacy indicators
+    // (mic / camera). Only PrivacyLeds may write them, via the
+    // setRgbColor_privacy_only() friend method below. Any other caller
+    // (MCP tool, neon ring, chat-state animation) is rejected here so
+    // the guarantee does not depend on every individual call site
+    // remembering to skip 6/7.
+    if (index == 6 || index == 7) {
+        mclog::tagWarn(_tag, "setRgbColor: index {} is privacy-reserved; use PrivacyLeds API", index);
+        return;
+    }
+    if (!_io_expander) {
+        return;
+    }
+    _io_expander->setLedColor(index, r, g, b);
+}
+
+void Hal::setRgbColor_privacy_only(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
+{
     if (!_io_expander) {
         return;
     }
@@ -85,7 +103,9 @@ void Hal::refreshRgb()
 
 void Hal::showRgbColor(uint8_t r, uint8_t g, uint8_t b)
 {
+    // Skip 6 and 7 — privacy-reserved. PrivacyLeds owns those.
     for (int i = 0; i < 12; i++) {
+        if (i == 6 || i == 7) continue;
         setRgbColor(i, r, g, b);
     }
     refreshRgb();
@@ -101,7 +121,15 @@ static void camera_led_timer_cb(void* arg)
 
 void Hal::setCameraLedActive(bool active, uint32_t duration_ms)
 {
-    for (int i = 6; i < 12; i++) {
+    // Privacy LED step 2: scoped to indices 8..11 (was 6..11). Index 7 is
+    // owned by PrivacyLeds for the camera privacy indicator; the dim-red
+    // "camera capturing" hint that this function paints would conflict
+    // with PrivacyLeds' authoritative red-on-active. Index 6 is the mic
+    // indicator and never belonged in the camera-LED loop in the first
+    // place — that was a pre-existing bug. The remaining 8..11 still
+    // animate the right ring's outer pixels which serve as the take_photo
+    // "shutter flash" UX.
+    for (int i = 8; i < 12; i++) {
         setRgbColor(i, active ? 50 : 0, 0, 0);
     }
     refreshRgb();

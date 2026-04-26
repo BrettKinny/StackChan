@@ -72,20 +72,24 @@ namespace stackchan::privacy {
 constexpr uint8_t kMicLedIndex    = 6;  // global; right-ring local index 0
 constexpr uint8_t kCameraLedIndex = 7;  // global; right-ring local index 1
 
-// Colour palette. Distinct from existing scheme:
+// Hue-based palette. Each privacy state has a distinct HUE, not a brightness
+// step on the same hue, so the indicator reads correctly through phone
+// cameras, in peripheral vision, and by colour-blind observers. Values are
+// pre-quantized to RGB565 (5/6/5) so what you see matches what's coded.
+//
+// Distinct from existing UI palette:
 //   - left-ring chat states use yellow / purple / green / blue
 //   - right-ring face-detect uses cyan (0, 168, 168)
 //   - face-tracking uses left-ring solid green (0, 168, 0)
-// Pure white and pure red are NOT used elsewhere.
-constexpr uint8_t kMicLocalR    = 40;
-constexpr uint8_t kMicLocalG    = 40;
-constexpr uint8_t kMicLocalB    = 40;
+constexpr uint8_t kMicLocalR    = 248;  // amber: ADC open, local-only
+constexpr uint8_t kMicLocalG    = 96;
+constexpr uint8_t kMicLocalB    = 0;
 
-constexpr uint8_t kMicStreamR   = 200;
-constexpr uint8_t kMicStreamG   = 200;
+constexpr uint8_t kMicStreamR   = 0;    // cyan-blue: streaming opus to server
+constexpr uint8_t kMicStreamG   = 160;
 constexpr uint8_t kMicStreamB   = 200;
 
-constexpr uint8_t kCameraR      = 200;
+constexpr uint8_t kCameraR      = 200;  // red: camera consumer active
 constexpr uint8_t kCameraG      = 0;
 constexpr uint8_t kCameraB      = 0;
 
@@ -119,6 +123,13 @@ public:
     // Cheap (two setRgbColor + one refreshRgb).
     void update();
 
+    // Boot-time self-test: cycles BOTH privacy pixels through the full
+    // palette (amber -> cyan-blue -> red -> off, ~500 ms each, ~2 s total)
+    // so the operator can confirm at power-on that both LEDs and the I2C
+    // bus to the PY32 are alive. Inhibits update() reconciliation for the
+    // duration so chat-state animations cannot overpaint the test pattern.
+    void runBootSelfTest();
+
 private:
     PrivacyLeds() = default;
 
@@ -134,6 +145,7 @@ private:
 
     std::atomic<MicState>    _mic_state    {MicState::Off};
     std::atomic<CameraState> _camera_state {CameraState::Off};
+    std::atomic<bool>        _inhibit_update {false};
 };
 
 }  // namespace stackchan::privacy

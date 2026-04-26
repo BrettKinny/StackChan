@@ -10,6 +10,8 @@
 #include <stackchan/privacy/privacy_leds.h>
 #include <hal/board/hal_bridge.h>
 #include <apps/common/common.h>
+#include <board.h>          // Board::GetInstance() — privacy LED step 3
+#include <audio_codec.h>     // AudioCodec::input_enabled() — privacy LED step 3
 
 using namespace stackchan;
 
@@ -141,12 +143,16 @@ void Hal::xiaozhi_mcp_init()
     mclog::tagInfo(_tag, "add robot.get_privacy_state tool");
     mcp_server.AddTool(
         "self.robot.get_privacy_state",
-        "READ-ONLY. Returns what the robot THINKS its privacy indicator LEDs are showing. "
+        "READ-ONLY. Returns BOTH the LED intent AND the underlying peripheral truth. "
         "mic = 'off' | 'local' | 'streaming' (off = mic ADC closed; local = ADC on, only feeding "
         "wake-word/VAD locally; streaming = ADC on AND opus frames being sent to the server). "
         "camera = 'off' | 'streaming' (off = no consumer reading frames; streaming = face-detect "
-        "or take_photo is currently dequeuing camera frames). This tool CANNOT change the LEDs — "
-        "they are hardware-tied to the actual peripheral state.",
+        "or take_photo is currently dequeuing camera frames). "
+        "mic_peripheral_open = true iff the audio codec input device is currently open. "
+        "camera_peripheral_streaming = true iff the camera driver is in a streamable state "
+        "(placeholder true-always until step 4-5 wires V4L2 truth). "
+        "last_capture_ts_ms = millis-since-boot of the last Capture() call (0 = never). "
+        "This tool CANNOT change the LEDs — they are hardware-tied to the actual peripheral state.",
         std::vector<Property>{},
         [this](const PropertyList& properties) -> ReturnValue {
             const char* mic_str = "off";
@@ -160,7 +166,26 @@ void Hal::xiaozhi_mcp_init()
                 case privacy::CameraState::Off:    cam_str = "off"; break;
                 case privacy::CameraState::Active: cam_str = "streaming"; break;
             }
-            auto result = fmt::format(R"({{"mic": "{}", "camera": "{}"}})", mic_str, cam_str);
+
+            // Peripheral-level truth. Independent of LED intent so the
+            // bridge can alarm if the two diverge (e.g. STREAMON issued
+            // but ISP still warming after step 4-5 lands).
+            bool mic_open = false;
+            if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+                mic_open = codec->input_enabled();
+            }
+            bool cam_streaming = false;
+            uint32_t last_cap_ms = 0;
+            if (auto* cam = hal_bridge::board_get_camera()) {
+                cam_streaming = cam->isStreaming();
+                last_cap_ms   = cam->lastCaptureTimestampMs();
+            }
+            auto result = fmt::format(
+                R"({{"mic": "{}", "camera": "{}", "mic_peripheral_open": {}, "camera_peripheral_streaming": {}, "last_capture_ts_ms": {}}})",
+                mic_str, cam_str,
+                mic_open ? "true" : "false",
+                cam_streaming ? "true" : "false",
+                last_cap_ms);
             mclog::tagInfo(_tag, "get_privacy_state: {}", result);
             return result;
         });

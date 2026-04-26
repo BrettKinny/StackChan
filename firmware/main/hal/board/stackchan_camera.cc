@@ -396,6 +396,13 @@ void StackChanCamera::SetExplainUrl(const std::string& url, const std::string& t
 
 bool StackChanCamera::Capture()
 {
+    // Privacy LED step 3: stamp the moment we begin a capture, regardless
+    // of whether arbitration succeeds. The bridge polls this via MCP
+    // get_privacy_state to confirm the camera was exercised after a
+    // take_photo call. esp_log_timestamp() returns ms since boot
+    // (uint32_t, wraps every ~49 days — informational use only).
+    last_capture_ts_ms_ = esp_log_timestamp();
+
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -867,6 +874,17 @@ bool StackChanCamera::Capture()
         auto image = std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
     }
+    return true;
+}
+
+bool StackChanCamera::isStreaming() const
+{
+    // TODO(privacy-led-step-4): replace with V4L2 truth (streaming_on_
+    // AND a consumer is actively dequeuing). Today VIDIOC_STREAMON is
+    // permanent after construction so the camera is always streaming;
+    // returning true unconditionally matches that reality. Step 4-5
+    // will move STREAMON out of the constructor and tie this to the
+    // refcounted CameraPeripheralGuard.
     return true;
 }
 
