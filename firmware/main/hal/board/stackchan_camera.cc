@@ -898,12 +898,12 @@ bool StackChanCamera::StreamCaptures()
         return false;
     }
 
-    // Layer 1 privacy LED. One face-detect cycle is reading a frame; the
-    // guard lifetime is one StreamCaptures() call. With face_detector
-    // running at ~20 Hz this means the LED is solidly on whenever
-    // detection is enabled. See stackchan/privacy/PRIVACY_LEDS.md
-    // ("Deferred work") for the proper STREAMON-bound version.
-    stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
+    // Privacy LED guard moved up to FaceDetector::processFrame() so it
+    // wraps both the StreamCaptures() capture step (~50 ms) AND the
+    // ESP-DL inference (~280 ms). The previous per-StreamCaptures scope
+    // visibly blinked the red privacy LED at the inference cadence
+    // (capture-on, inference-off, capture-on, ...). Step 4-5 replaces
+    // both with a refcounted CameraPeripheralGuard tied to STREAMON.
 
     {
         struct v4l2_buffer buf = {};

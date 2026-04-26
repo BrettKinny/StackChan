@@ -54,6 +54,18 @@ private:
     // detection to re-acquire during small head movements before
     // flipping back to idle.
     uint32_t _grace_period_ms = 800;
+
+    // Phase 0 instrumentation — counters reset every kPhase0WindowMs.
+    // See probes/face-tracking-naturalness.md for the bench procedure.
+    // Cheap to leave in place; one ESP_LOGI line per 5 s window.
+    uint32_t _phase0_window_start_ms = 0;
+    uint32_t _phase0_last_tick_ms    = 0;
+    uint32_t _phase0_last_seen_ts    = 0;
+    uint32_t _phase0_samples         = 0;
+    uint32_t _phase0_det             = 0;
+    uint32_t _phase0_unique_frames   = 0;
+    uint32_t _phase0_track_ms        = 0;
+    uint32_t _phase0_cmd             = 0;
 };
 
 }  // namespace stackchan

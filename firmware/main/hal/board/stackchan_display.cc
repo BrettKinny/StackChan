@@ -332,6 +332,7 @@ void StackChanAvatarDisplay::LvglUnlock()
 
 static void set_left_leds(uint8_t r, uint8_t g, uint8_t b)
 {
+    ESP_LOGW("ChatLed", "DEBUG set_left_leds(%u,%u,%u)", r, g, b);
     for (int i = 0; i < 6; i++) {
         GetHAL().setRgbColor(i, r, g, b);
     }
@@ -538,7 +539,7 @@ bool hal_bridge::is_xiaozhi_ready()
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
 {
-    // ESP_LOGE(TAG, "SetStatus: %s", status);
+    ESP_LOGW("ChatLed", "DEBUG SetStatus called with: '%s'", status ? status : "(null)");
 
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {

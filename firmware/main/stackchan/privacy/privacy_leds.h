@@ -69,8 +69,12 @@ namespace stackchan::privacy {
 // LED ring indices reserved for Layer 1 privacy indicators.
 // Right ring spans global 6..11; we take 6 and 7. Indices 8..11 stay
 // available to the existing chat-state ring animations.
-constexpr uint8_t kMicLedIndex    = 6;  // global; right-ring local index 0
-constexpr uint8_t kCameraLedIndex = 7;  // global; right-ring local index 1
+// Privacy pixels at OPPOSITE ENDS of the right ring (was 6 + 7, both at
+// the top — visually crowded). Now top + bottom, leaving indices 7-10 in
+// the middle free for future indicators (cloud-connection, smart-mode
+// pip, etc.).
+constexpr uint8_t kMicLedIndex    = 6;   // global; top of right ring
+constexpr uint8_t kCameraLedIndex = 11;  // global; bottom of right ring
 
 // Universal recording-light convention. Mic = GREEN ("Dotty is listening"),
 // Camera = RED ("Dotty is recording"). When mic is ACTIVELY STREAMING audio
