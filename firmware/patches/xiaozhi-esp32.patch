@@ -1,8 +1,39 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..261eb87 100644
+index d69d43d..94cd19e 100644
 --- c/main/application.cc
 +++ w/main/application.cc
-@@ -526,7 +526,6 @@ void Application::InitializeProtocol() {
+@@ -249,11 +249,29 @@ void Application::Run() {
+             clock_ticks_++;
+             auto display = Board::GetInstance().GetDisplay();
+             display->UpdateStatusBar();
+-        
++
+             // Print debug info every 10 seconds
+             if (clock_ticks_ % 10 == 0) {
+                 SystemInfo::PrintHeapStats();
+             }
++
++            // Dotty: proactive WS reconnect on idle-channel timeout.
++            // IsTimeout() flips at 120 s of silence on the channel, but
++            // the OS-level TCP teardown can take another ~45 s on top of
++            // that, leaving the device disconnected and unresponsive to
++            // walk-up events until a manual nudge re-opens the channel.
++            // While idle, eagerly close+reopen so the next SendEvent /
++            // wake-word / listen path finds a live channel waiting.
++            if (clock_ticks_ % 30 == 0 &&
++                GetDeviceState() == kDeviceStateIdle &&
++                protocol_ != nullptr &&
++                protocol_->IsTimeout()) {
++                ESP_LOGW(TAG, "Idle channel timeout — proactive close+reopen");
++                protocol_->CloseAudioChannel();
++                if (!protocol_->OpenAudioChannel()) {
++                    ESP_LOGW(TAG, "Idle channel reopen failed; will retry next cycle");
++                }
++            }
+         }
+     }
+ }
+@@ -526,7 +544,6 @@ void Application::InitializeProtocol() {
              if (strcmp(state->valuestring, "start") == 0) {
                  Schedule([this]() {
                      aborted_ = false;
@@ -10,7 +41,7 @@ index d69d43d..261eb87 100644
                  });
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
-@@ -542,7 +541,10 @@ void Application::InitializeProtocol() {
+@@ -542,7 +559,10 @@ void Application::InitializeProtocol() {
                  auto text = cJSON_GetObjectItem(root, "text");
                  if (cJSON_IsString(text)) {
                      ESP_LOGI(TAG, "<< %s", text->valuestring);
@@ -22,7 +53,7 @@ index d69d43d..261eb87 100644
                          display->SetChatMessage("assistant", message.c_str());
                      });
                  }
-@@ -553,10 +555,12 @@ void Application::InitializeProtocol() {
+@@ -553,10 +573,12 @@ void Application::InitializeProtocol() {
                  ESP_LOGI(TAG, ">> %s", text->valuestring);
                  Schedule([display, message = std::string(text->valuestring)]() {
                      display->SetChatMessage("user", message.c_str());
@@ -35,7 +66,7 @@ index d69d43d..261eb87 100644
              if (cJSON_IsString(emotion)) {
                  Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                      display->SetEmotion(emotion_str.c_str());
-@@ -610,33 +614,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +632,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -97,7 +128,7 @@ index d69d43d..261eb87 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -711,13 +718,23 @@ void Application::HandleToggleChatEvent() {
+@@ -711,13 +736,23 @@ void Application::HandleToggleChatEvent() {
  }
  
  void Application::ContinueOpenAudioChannel(ListeningMode mode) {
@@ -123,7 +154,7 @@ index d69d43d..261eb87 100644
              return;
          }
      }
-@@ -1075,6 +1092,28 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1075,6 +1110,28 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -514,19 +545,32 @@ index 470cc91..53675f5 100644
      const int kTimeoutSeconds = 120;
      auto now = std::chrono::steady_clock::now();
 diff --git c/main/protocols/protocol.h w/main/protocols/protocol.h
-index 28ef604..510e91f 100644
+index 28ef604..fd66f0f 100644
 --- c/main/protocols/protocol.h
 +++ w/main/protocols/protocol.h
-@@ -73,6 +73,9 @@ public:
+@@ -73,6 +73,14 @@ public:
      virtual void SendStopListening();
      virtual void SendAbortSpeaking(AbortReason reason);
      virtual void SendMcpMessage(const std::string& message);
 +    // Dotty: ambient perception event frame.
 +    // Emits {"type":"event","name":<name>,"data":<data_json>} server-bound.
 +    virtual void SendEvent(const std::string& name, const std::string& data_json);
++
++    // Dotty: exposed for the proactive idle-channel reconnect in the
++    // main clock-tick handler. True if no incoming WS frame has arrived
++    // in kTimeoutSeconds (120 s).
++    virtual bool IsTimeout() const;
  
  protected:
      std::function<void(const cJSON* root)> on_incoming_json_;
+@@ -91,7 +99,6 @@ protected:
+ 
+     virtual bool SendText(const std::string& text) = 0;
+     virtual void SetError(const std::string& message);
+-    virtual bool IsTimeout() const;
+ };
+ 
+ #endif // PROTOCOL_H
 diff --git c/main/protocols/websocket_protocol.cc w/main/protocols/websocket_protocol.cc
 index f0cc034..34739af 100644
 --- c/main/protocols/websocket_protocol.cc

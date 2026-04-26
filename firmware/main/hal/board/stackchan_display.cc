@@ -551,6 +551,17 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     DisplayLockGuard lock(this);
 
+    // Face detection is decoupled from chat state — runs whenever
+    // Dotty isn't sleeping. The previous gating (enable in STANDBY,
+    // disable in everything else) silently killed walk-up greetings
+    // whenever the device missed the transition back to STANDBY,
+    // because face_detected events stopped reaching the bridge.
+    // The face *tracking* modifier (servo head movement) is still
+    // gated below so the head doesn't track faces mid-reply.
+    if (!is_sleeping_) {
+        FaceDetector::getInstance().setEnabled(true);
+    }
+
     bool is_idle      = false;
     bool is_listening = false;
 
@@ -627,8 +638,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
         }
 
-        // Enable face detection and tracking in idle
-        FaceDetector::getInstance().setEnabled(true);
+        // Face detector is enabled at function entry (decoupled from
+        // chat state). Add the tracking modifier so the head follows
+        // the bbox while idle.
         if (face_tracking_modifier_id_ < 0) {
             // FaceTrackingModifier resolves IdleMotionModifier by stable
             // name on each pause/resume rather than caching a pool ID,
@@ -653,8 +665,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
                 });
         }
     } else {
-        // Stop face tracking and detection
-        FaceDetector::getInstance().setEnabled(false);
+        // Stop face *tracking* (servo follow) — but leave the detector
+        // running so face_detected events still flow to the bridge
+        // throughout the listen / think / speak phases.
         if (face_tracking_modifier_id_ >= 0) {
             stackchan.removeModifier(face_tracking_modifier_id_);
             face_tracking_modifier_id_ = -1;
