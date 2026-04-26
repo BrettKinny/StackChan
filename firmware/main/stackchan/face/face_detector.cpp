@@ -5,7 +5,6 @@
  */
 #include "face_detector.h"
 #include "face_detection_result.h"
-#include "face_recognizer.h"
 #include "camera_arbiter.h"
 #include <stackchan/privacy/camera_peripheral_guard.h>
 
@@ -16,10 +15,8 @@
 #include <hal/board/stackchan_camera.h>
 
 #include <cstdio>
-#include <string>
 
 #include "human_face_detect.hpp"
-#include "application.h"  // Layer 4: face_recognized perception event
 
 #define TAG "FaceDetector"
 
@@ -82,15 +79,6 @@ void FaceDetector::start()
             _stop_sem = nullptr;
         }
         return;
-    }
-
-    // Layer 4: bring the recognizer's NVS-backed enrollment cache up
-    // before the detector task starts firing recognize() calls. init()
-    // is idempotent and best-effort — a failure leaves the recognizer in
-    // a degraded "always returns unknown" state without breaking
-    // detection.
-    if (!FaceRecognizer::getInstance().init()) {
-        ESP_LOGW(TAG, "FaceRecognizer init returned false (degraded mode)");
     }
 
     xTaskCreatePinnedToCore(taskEntry, "face_det", 16384, this, 1, &_task_handle, 0);
@@ -258,81 +246,14 @@ void FaceDetector::processFrame()
                  best.box[0], best.box[1], best.box[2], best.box[3], best.score,
                  norm_x, norm_y);
 
-        // Layer 4: on-device face recognition. We run this AFTER we've
-        // already published the bbox to FaceDetectionResult so the
-        // tracking modifier sees the position with zero recognizer
-        // latency on its critical path.
-        //
-        // Throttled to once per kRecognizeThrottleMs because:
-        //   - the embedding model (when wired) costs ~30 ms+ per crop;
-        //   - the bridge only needs identity for greeting / personalization,
-        //     not at frame rate;
-        //   - emitting an event every frame would flood the WS protocol.
-        //
-        // SCAFFOLD: FaceRecognizer::recognize() always returns "unknown"
-        // until ESP-DL face_recognition.so is wired in face_recognizer.cpp.
-        if (now - _last_recognize_ms >= kRecognizeThrottleMs) {
-            _last_recognize_ms = now;
-
-            FaceImage face_img{};
-            face_img.data    = frame_data;
-            face_img.width   = frame_w;
-            face_img.height  = frame_h;
-            face_img.pix_fmt = (int)frame_fmt;
-            // Pass bbox in source-image coords; recognizer will crop.
-            // Clamp negative values defensively even though best.box is
-            // generally well-formed from the model.
-            face_img.bbox_x1 = best.box[0] < 0 ? 0 : best.box[0];
-            face_img.bbox_y1 = best.box[1] < 0 ? 0 : best.box[1];
-            face_img.bbox_x2 = best.box[2] < 0 ? 0 : best.box[2];
-            face_img.bbox_y2 = best.box[3] < 0 ? 0 : best.box[3];
-
-            std::string identity;
-            try {
-                identity = FaceRecognizer::getInstance().recognize(face_img);
-            } catch (...) {
-                // recognize() never throws today, but keep the guard so a
-                // future ESP-DL hookup that does throw can't take down the
-                // detector task.
-                identity = FaceRecognizer::kUnknown;
-                ESP_LOGW(TAG, "recognize threw — falling back to unknown");
-            }
-            if (identity.empty()) identity = FaceRecognizer::kUnknown;
-
-            // Emit only on identity transition OR if enough time has
-            // passed since the last emit, to keep the bus quiet when
-            // the same person is in frame for a long stretch. The
-            // throttle above already gates re-running recognize(); this
-            // additional edge gate keeps the WS chatter to a minimum.
-            bool changed = (identity != _last_emitted_identity);
-            bool stale = (now - _last_emitted_ms) >= kEmitStaleMs;
-            if (changed || stale) {
-                _last_emitted_identity = identity;
-                _last_emitted_ms       = now;
-
-                // JSON-escape the identity so a future name with a quote
-                // can't break the payload. Names are length-bounded and
-                // control-char-rejected at enrollment time, so quote and
-                // backslash are the only realistic problems here.
-                std::string esc;
-                esc.reserve(identity.size() + 2);
-                for (char c : identity) {
-                    if (c == '"' || c == '\\') esc.push_back('\\');
-                    esc.push_back(c);
-                }
-                char payload[96];
-                std::snprintf(payload, sizeof(payload),
-                              R"({"identity":"%s"})", esc.c_str());
-                Application::GetInstance().SendEvent("face_recognized", payload);
-                ESP_LOGI(TAG, "face_recognized identity=%s", identity.c_str());
-            }
-        }
+        // No on-device identification — the dlib biometric path has been
+        // removed. The bridge derives identity from a VLM description
+        // matched against the household roster. Per-frame `face_detected`
+        // / `face_lost` events are emitted from the FaceTrackingModifier
+        // (firmware/main/stackchan/modifiers/face_tracking.cpp); the
+        // detector itself only writes the bbox to FaceDetectionResult.
     } else {
         result.write(false, 0, 0, 0, now);
-        // No face in frame: clear the emitted-identity tracker so the
-        // next acquisition emits a fresh face_recognized even if it's
-        // the same person who just stepped out and back in.
-        _last_emitted_identity.clear();
     }
 }
 
