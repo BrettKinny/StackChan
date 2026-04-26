@@ -54,14 +54,11 @@ private:
     // photo since boot". Wraps every ~49 days (uint32_t millis) — fine.
     uint32_t last_capture_ts_ms_ = 0;
 
-    // Phase B (face recognition) helpers. Multipart streamer factored out
-    // of Explain() so the face_enroll/face_recognize tools can reuse it.
+    // Multipart streamer used by Explain() to POST a JPEG to the bridge's
+    // /api/vision/explain endpoint (room_view / VLM identification path).
     std::string StreamJpegToBridge(
         const std::string& url, const std::string& token,
         const std::vector<std::pair<std::string, std::string>>& extra_fields);
-    std::string DeriveFaceUrl(const std::string& verb) const;
-    std::string SimpleBridgeRequest(const std::string& method, const std::string& url,
-                                    const std::string& content_type, const std::string& body);
 
     // Privacy LED steps 4-5 lifecycle. Reachable only through the friend
     // CameraPeripheralGuard refcount — the only path that should toggle
@@ -86,13 +83,6 @@ public:
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;
     virtual std::string Explain(const std::string& question);
-
-    // Layer 4 face recognition (server-side). All four go to the bridge
-    // at the URL derived from explain_url_ — see DeriveFaceUrl().
-    virtual std::string EnrollFace(const std::string& name);
-    virtual std::string RecognizeFace();
-    virtual std::string ForgetFace(const std::string& name);
-    virtual std::string ListFaces();
 
     // Privacy LED step 3 accessors. isStreaming() is a placeholder that
     // returns true unconditionally; step 4-5 (the camera lifecycle

@@ -545,7 +545,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
 
@@ -576,13 +575,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     bool is_idle      = false;
-    bool is_listening = false;
-    bool is_speaking  = false;
     const ChatProfile* profile_to_push = nullptr;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         in_listening_status_ = true;
-        is_listening         = true;
         profile_to_push      = &kChatProfileListening;
         if (speaking_modifier_id_ >= 0) {
             stackchan.removeModifier(speaking_modifier_id_);
@@ -630,7 +626,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         in_listening_status_ = false;
         thinking_led_pending_ = false;
-        is_speaking          = true;
         profile_to_push      = &kChatProfileSpeaking;
         esp_timer_stop(thinking_timer_);
         if (thinking_modifier_id_ >= 0) {
