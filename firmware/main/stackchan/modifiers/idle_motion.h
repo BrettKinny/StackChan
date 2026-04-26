@@ -32,10 +32,23 @@ public:
     // small-observation drifts only.
     static constexpr uint32_t kReturnToCenterSteadyMs = 5000;
 
+    // Empty-room backoff (servo lifespan): once no face has been locked for
+    // kEmptyRoomThresholdMs, the next idle delay is drawn from
+    // kEmptyRoomMinMs..kEmptyRoomMaxMs instead of _interval_min.._interval_max.
+    // Halves idle servo cycles in unattended periods. Reverts to the normal
+    // mix the moment a face is re-acquired (setTrackingMode(true) restamps
+    // _last_tracking_active_ms via setTrackingMode(false) when the face later
+    // leaves frame).
+    static constexpr uint32_t kEmptyRoomThresholdMs = 120000;  // 2 min
+    static constexpr uint32_t kEmptyRoomMinMs       = 15000;
+    static constexpr uint32_t kEmptyRoomMaxMs       = 30000;
+
     IdleMotionModifier(uint32_t interval_min = 4000, uint32_t interval_max = 8000)
         : _interval_min(interval_min), _interval_max(interval_max)
     {
-        _next_tick = GetHAL().millis() + 1000;  // 启动 1 秒后开始第一次动作
+        uint32_t now = GetHAL().millis();
+        _next_tick = now + 1000;          // 启动 1 秒后开始第一次动作
+        _last_tracking_active_ms = now;   // Empty-room timer starts at boot.
     }
 
     const char* name() const override
@@ -63,7 +76,9 @@ public:
         } else {
             // Exiting tracking mode (face lost / grace expired) — kick the
             // next idle action soon so the head doesn't sit dead-eyed for
-            // a full 4–8 s.
+            // a full 4–8 s. Stamp _last_tracking_active_ms so the empty-room
+            // timer counts from the moment the face left, not from boot.
+            _last_tracking_active_ms = now;
             _next_tick = now + 500;
         }
     }
@@ -112,10 +127,16 @@ public:
 
         // 算下一次的时间间隔 — overlay uses a longer cadence than full idle.
         // Overlay range is settable via setIntervalRange (Phase 3); idle range
-        // stays at constructor defaults.
-        uint32_t delay = _tracking_mode
-            ? Random::getInstance().getInt(_tracking_overlay_min_ms, _tracking_overlay_max_ms)
-            : Random::getInstance().getInt(_interval_min, _interval_max);
+        // stays at constructor defaults. When idle and the empty-room
+        // threshold has elapsed, draw from the slow range instead.
+        uint32_t delay;
+        if (_tracking_mode) {
+            delay = Random::getInstance().getInt(_tracking_overlay_min_ms, _tracking_overlay_max_ms);
+        } else if ((now - _last_tracking_active_ms) > kEmptyRoomThresholdMs) {
+            delay = Random::getInstance().getInt(kEmptyRoomMinMs, kEmptyRoomMaxMs);
+        } else {
+            delay = Random::getInstance().getInt(_interval_min, _interval_max);
+        }
         _next_tick     = now + delay;
         // mclog::info("next idle motion in {} ms", delay);
     }
@@ -228,6 +249,11 @@ private:
     uint32_t _tracking_overlay_min_ms = kTrackingOverlayMinMs;
     uint32_t _tracking_overlay_max_ms = kTrackingOverlayMaxMs;
     float    _amplitude_scale         = 1.0f;
+    // Empty-room backoff state: stamps the time of the last face-locked
+    // → unlocked transition (or boot, whichever is later). Constructor
+    // initialises to GetHAL().millis() so the timer starts counting from
+    // power-on; setTrackingMode(false) re-stamps it on each face_lost.
+    uint32_t _last_tracking_active_ms = 0;
 };
 
 }  // namespace stackchan
