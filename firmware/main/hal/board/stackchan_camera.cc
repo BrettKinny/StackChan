@@ -18,6 +18,7 @@
 #include "stackchan_camera.h"
 #include <stackchan/face/camera_arbiter.h>
 #include <stackchan/privacy/camera_peripheral_guard.h>
+#include <stackchan/stackchan.h>
 #include "esp_jpeg_common.h"
 #include "jpg/image_to_jpeg.h"
 #include "jpg/jpeg_to_image.h"
@@ -413,6 +414,16 @@ bool StackChanCamera::Capture()
         stackchan::CameraArbiter& a;
         ~ArbiterGuard() { a.releaseForCapture(); }
     } arbiter_guard{arbiter};
+
+    // Freeze head servos for the duration of the still capture so face-
+    // tracking, idle-motion, and IMU reactions don't move the head mid-
+    // shutter. Cooperative gate — the modifiers check isModifyLocked()
+    // each tick. Avatar (blink/expression) is intentionally left alive.
+    struct MotionPauseGuard {
+        stackchan::motion::Motion& m;
+        MotionPauseGuard(stackchan::motion::Motion& motion) : m(motion) { m.setModifyLock(true); }
+        ~MotionPauseGuard() { m.setModifyLock(false); }
+    } motion_pause_guard{ ::GetStackChan().motion() };
 
     // Layer 1 privacy LED. We are about to dequeue 3 frames from the V4L2
     // driver — the camera is actively producing data for us. Light the

@@ -213,6 +213,13 @@ void FaceTrackingModifier::setIdleTrackingMode(bool tracking)
 
 void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
 {
+    // Cooperative motion lock — held by StackChanCamera::Capture() during
+    // a still so the head stays put for the shutter. EMA / state machine
+    // continue updating in _update() so the next post-lock command targets
+    // the fresh face position rather than a stale pre-shutter one.
+    if (stackchan.motion().isModifyLocked()) {
+        return;
+    }
     // Deadband: skip the servo command if the smoothed target moved less
     // than kDeadbandFrac of the (full) normalized span on each axis since
     // the last command. Prevents detector jitter (~1-2 px bbox shimmer)
