@@ -648,8 +648,16 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             face_tracking_modifier_id_ = stackchan.addModifier(
                 std::make_unique<FaceTrackingModifier>());
         }
-        // Cyan right LED = face-detection mode active
-        stackchan.rightNeonLight().setColor(0, 168, 168);
+        // Right ring outer pixels (8-11) stay dark in idle. The previous
+        // always-on cyan "face-detection mode active" indicator was visual
+        // noise — face detector is now permanently on (since fix `8d74dd7`
+        // decoupled it from chat state) so a continuous indicator carried
+        // no actionable signal. The privacy LEDs at indices 6+7 already
+        // give the family the "is the camera on?" answer (red on index 7).
+        // Future: tie indices 8-11 to face_tracking state (green when a
+        // face is actively being tracked) — that's the "is Dotty looking
+        // at me right now?" signal worth lighting.
+        stackchan.rightNeonLight().setColor(0, 0, 0);
 
         // Phase 1.2: register the ambient sound localizer once. Its
         // callback fires from the audio input task whenever stereo

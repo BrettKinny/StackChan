@@ -72,26 +72,32 @@ namespace stackchan::privacy {
 constexpr uint8_t kMicLedIndex    = 6;  // global; right-ring local index 0
 constexpr uint8_t kCameraLedIndex = 7;  // global; right-ring local index 1
 
-// Hue-based palette. Each privacy state has a distinct HUE, not a brightness
-// step on the same hue, so the indicator reads correctly through phone
-// cameras, in peripheral vision, and by colour-blind observers. Values are
-// pre-quantized to RGB565 (5/6/5) so what you see matches what's coded.
+// Universal recording-light convention. Mic = GREEN ("Dotty is listening"),
+// Camera = RED ("Dotty is recording"). When mic is ACTIVELY STREAMING audio
+// to the cloud (vs local-only wake-word listening), the green pulses at
+// ~1 Hz instead of staying steady — same color, different pattern, so
+// "your voice is leaving the device" reads as a distinct alarm without
+// needing a second color. Pre-quantized to RGB565 (5/6/5).
 //
-// Distinct from existing UI palette:
-//   - left-ring chat states use yellow / purple / green / blue
-//   - right-ring face-detect uses cyan (0, 168, 168)
-//   - face-tracking uses left-ring solid green (0, 168, 0)
-constexpr uint8_t kMicLocalR    = 248;  // amber: ADC open, local-only
-constexpr uint8_t kMicLocalG    = 96;
-constexpr uint8_t kMicLocalB    = 0;
+// Camera-pulsing-when-uploading is planned but deferred until step 4-5
+// adds the firmware-side local-vs-upload distinction. Today camera shows
+// steady red whenever any consumer is reading frames.
+//
+// Distinct from existing UI palette: left-ring chat states use the same
+// green during LISTENING — that's intentional reinforcement (both say
+// "Dotty is listening"). Spatial separation (left vs right ring) keeps
+// them readable.
+constexpr uint8_t kMicR         = 0;    // green: mic on
+constexpr uint8_t kMicG         = 200;
+constexpr uint8_t kMicB         = 0;
 
-constexpr uint8_t kMicStreamR   = 0;    // cyan-blue: streaming opus to server
-constexpr uint8_t kMicStreamG   = 160;
-constexpr uint8_t kMicStreamB   = 200;
-
-constexpr uint8_t kCameraR      = 200;  // red: camera consumer active
+constexpr uint8_t kCameraR      = 200;  // red: camera on
 constexpr uint8_t kCameraG      = 0;
 constexpr uint8_t kCameraB      = 0;
+
+// 1 Hz pulse period. update() runs every ~10 ms; a 1000 ms period with
+// 50% duty cycle means the LED is lit for ~500 ms, dark for ~500 ms.
+constexpr uint32_t kPulsePeriodMs = 1000;
 
 enum class MicState : uint8_t {
     Off    = 0,  // codec input device closed
