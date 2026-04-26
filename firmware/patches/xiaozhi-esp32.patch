@@ -1,8 +1,16 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..94cd19e 100644
+index d69d43d..b3f4ddb 100644
 --- c/main/application.cc
 +++ w/main/application.cc
-@@ -249,11 +249,29 @@ void Application::Run() {
+@@ -12,6 +12,7 @@
+ 
+ #include <cstring>
+ #include <esp_log.h>
++#include <esp_heap_caps.h>
+ #include <cJSON.h>
+ #include <driver/gpio.h>
+ #include <arpa/inet.h>
+@@ -249,11 +250,65 @@ void Application::Run() {
              clock_ticks_++;
              auto display = Board::GetInstance().GetDisplay();
              display->UpdateStatusBar();
@@ -25,15 +33,51 @@ index d69d43d..94cd19e 100644
 +                protocol_ != nullptr &&
 +                protocol_->IsTimeout()) {
 +                ESP_LOGW(TAG, "Idle channel timeout — proactive close+reopen");
++                // === HEAP-LEAK DEBUG INSTRUMENTATION (dotty-heap-debug branch) ===
++                // Cycle counter + 3 heap dumps bracketing CloseAudioChannel() and
++                // OpenAudioChannel(). vTaskDelay(500ms) lets deferred frees settle
++                // before each snapshot. Use multi_heap_info for cheap per-cycle
++                // delta lines; full heap_caps_dump_all() only on cycle 5 for
++                // forensic histogram diff. To analyse:
++                //   idf.py monitor | tee /tmp/ws-leak-$(date +%s).log
++                //   grep -E 'HEAPDUMP|free internal' /tmp/ws-leak-*.log
++                static int debug_cycle = 0;
++                debug_cycle++;
++                multi_heap_info_t info_pre_close;
++                heap_caps_get_info(&info_pre_close, MALLOC_CAP_INTERNAL);
++                ESP_LOGW(TAG, "HEAPDUMP cycle=%d A pre-Close: free=%u min=%u allocs=%u",
++                         debug_cycle, info_pre_close.total_free_bytes,
++                         info_pre_close.minimum_free_bytes,
++                         info_pre_close.allocated_blocks);
++                vTaskDelay(pdMS_TO_TICKS(500));
 +                protocol_->CloseAudioChannel();
++                vTaskDelay(pdMS_TO_TICKS(500));
++                multi_heap_info_t info_post_close;
++                heap_caps_get_info(&info_post_close, MALLOC_CAP_INTERNAL);
++                ESP_LOGW(TAG, "HEAPDUMP cycle=%d B post-Close: free=%u min=%u allocs=%u",
++                         debug_cycle, info_post_close.total_free_bytes,
++                         info_post_close.minimum_free_bytes,
++                         info_post_close.allocated_blocks);
 +                if (!protocol_->OpenAudioChannel()) {
 +                    ESP_LOGW(TAG, "Idle channel reopen failed; will retry next cycle");
 +                }
++                vTaskDelay(pdMS_TO_TICKS(500));
++                multi_heap_info_t info_post_open;
++                heap_caps_get_info(&info_post_open, MALLOC_CAP_INTERNAL);
++                ESP_LOGW(TAG, "HEAPDUMP cycle=%d C post-Open: free=%u min=%u allocs=%u",
++                         debug_cycle, info_post_open.total_free_bytes,
++                         info_post_open.minimum_free_bytes,
++                         info_post_open.allocated_blocks);
++                if (debug_cycle == 5) {
++                    ESP_LOGW(TAG, "HEAPDUMP cycle=5 forensic full dump:");
++                    heap_caps_dump_all();
++                }
++                // === END HEAP-LEAK DEBUG INSTRUMENTATION ===
 +            }
          }
      }
  }
-@@ -526,7 +544,6 @@ void Application::InitializeProtocol() {
+@@ -526,7 +581,6 @@ void Application::InitializeProtocol() {
              if (strcmp(state->valuestring, "start") == 0) {
                  Schedule([this]() {
                      aborted_ = false;
@@ -41,7 +85,7 @@ index d69d43d..94cd19e 100644
                  });
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
-@@ -542,7 +559,10 @@ void Application::InitializeProtocol() {
+@@ -542,7 +596,10 @@ void Application::InitializeProtocol() {
                  auto text = cJSON_GetObjectItem(root, "text");
                  if (cJSON_IsString(text)) {
                      ESP_LOGI(TAG, "<< %s", text->valuestring);
@@ -53,7 +97,7 @@ index d69d43d..94cd19e 100644
                          display->SetChatMessage("assistant", message.c_str());
                      });
                  }
-@@ -553,10 +573,12 @@ void Application::InitializeProtocol() {
+@@ -553,10 +610,12 @@ void Application::InitializeProtocol() {
                  ESP_LOGI(TAG, ">> %s", text->valuestring);
                  Schedule([display, message = std::string(text->valuestring)]() {
                      display->SetChatMessage("user", message.c_str());
@@ -66,7 +110,7 @@ index d69d43d..94cd19e 100644
              if (cJSON_IsString(emotion)) {
                  Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                      display->SetEmotion(emotion_str.c_str());
-@@ -610,33 +632,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +669,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -128,7 +172,7 @@ index d69d43d..94cd19e 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -711,13 +736,23 @@ void Application::HandleToggleChatEvent() {
+@@ -711,13 +773,23 @@ void Application::HandleToggleChatEvent() {
  }
  
  void Application::ContinueOpenAudioChannel(ListeningMode mode) {
@@ -154,7 +198,7 @@ index d69d43d..94cd19e 100644
              return;
          }
      }
-@@ -1075,6 +1110,28 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1075,6 +1147,28 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
