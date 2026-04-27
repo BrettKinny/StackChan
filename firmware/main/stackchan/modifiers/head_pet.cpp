@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "head_pet.h"
+#include "../stackchan.h"             // Phase 5: ::GetStackChan() for state lookup
 #include "../utils/random.h"
+#include "../modes/state_manager.h"   // Phase 5: head-pet wakes from SLEEP
 #include "application.h"  // perception events + WakeWordInvoke
 #include <smooth_ui_toolkit.hpp>
 #include <memory>
@@ -51,6 +53,12 @@ void HeadPetModifier::_update(Modifiable& stackchan)
         _hold_wake_fired  = false;
         _touch_start_ms   = now;
         Application::GetInstance().SendEvent("head_pet_started", "{}");
+        // Phase 5 — wake from SLEEP on capacitive touch. StateManager gates
+        // on current state internally; outside SLEEP this is a no-op.
+        if (auto* sm = static_cast<StateManager*>(
+                ::GetStackChan().getModifierByName(StateManager::kName))) {
+            sm->onHeadPet();
+        }
     }
 
     // Affect: handle "being petted" (swipe gestures fire while held).

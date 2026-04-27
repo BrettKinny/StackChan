@@ -66,10 +66,15 @@ public:
 
     // Camera-edge hooks. Called from face_tracking.cpp inside the same
     // tick as the SendEvent("face_detected"|"face_lost", ...) emissions.
-    // STORY_TIME / SECURITY / SLEEP / DANCE are sticky and intentionally
-    // unaffected here — they have their own exit triggers.
+    // STORY_TIME / SECURITY / DANCE are sticky and intentionally unaffected
+    // by camera edges; SLEEP wakes on face_detected (Phase 5).
     void onFaceDetected();
     void onFaceLost();
+
+    // Phase 5 — capacitive head-pet wake. Called from head_pet.cpp when a
+    // press fires. No-op outside SLEEP; in SLEEP transitions to IDLE
+    // (head-pet is non-conversational, so we don't auto-engage TALK).
+    void onHeadPet();
 
     void _update(Modifiable& stackchan) override;
 
@@ -78,11 +83,19 @@ private:
     void emitStateChanged();
     void writePips(Modifiable& stackchan, uint32_t now);
 
+    // Phase 5 — sleep state side-effects.
+    void onEnterSleep();
+    void onExitSleep();
+
     State    _state            = State::IDLE;
     bool     _kid_mode         = false;
     bool     _smart_mode       = false;
     uint32_t _state_change_ms  = 0;
     uint32_t _last_assert_ms   = 0;
+    // Phase 5 — true while we've taken the sleep pose (yaw=0 pitch=450) but
+    // motion is still settling. _update releases servo torque once the move
+    // completes so the head can droop under gravity.
+    bool     _sleep_torque_release_pending = false;
 };
 
 }  // namespace stackchan
