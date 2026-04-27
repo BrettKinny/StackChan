@@ -73,6 +73,18 @@ void StateManager::setState(State next)
     if (next == State::SECURITY) {
         onEnterSecurity();
     }
+    // Dance edge events — give the bridge an explicit dance_active flag
+    // (separate from generic state_changed) so it can suppress autonomous
+    // photos / TTS for the duration of a dance without parsing state names.
+    if (next == State::DANCE) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "{\"from\":\"%s\"}", stateName(prev));
+        Application::GetInstance().SendEvent("dance_started", buf);
+    } else if (prev == State::DANCE) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "{\"to\":\"%s\"}", stateName(next));
+        Application::GetInstance().SendEvent("dance_ended", buf);
+    }
     emitStateChanged();
 }
 
@@ -171,6 +183,7 @@ void StateManager::onExitSleep()
     //    face_tracking is acquiring at the same time (SLEEP -> TALK via
     //    face_detected), its lookAt will override within a few ticks —
     //    that's the desired feel ("Dotty looks up, then at you").
+    Application::GetInstance().SendEvent("sleep_pose", "{\"phase\":\"wake_tilt\"}");
     sc.motion().moveWithSpeed(0, 70, 80);
     // 3. Release the modify lock so idle_motion (now back on the NORMAL
     //    profile via applyIdleProfile) can resume.
@@ -211,6 +224,7 @@ void StateManager::onEnterSecurity()
     }
     _security_running.store(true, std::memory_order_release);
     _security_stop_sem = xSemaphoreCreateBinary();
+    Application::GetInstance().SendEvent("security_pose", "{\"phase\":\"scan_start\"}");
     // 4 KB stack is plenty — the loop just calls motion APIs and sleeps.
     // Pinned to Core 1 (same as the main task) to keep Core 0 free for the
     // detector / audio pipelines. Priority 1 = same as face_det.

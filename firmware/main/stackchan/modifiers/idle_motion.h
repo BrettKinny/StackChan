@@ -6,10 +6,12 @@
 #pragma once
 #include "../modifiable.h"
 #include "../utils/random.h"
+#include "application.h"
 #include <smooth_ui_toolkit.hpp>
 // #include <mooncake_log.h>
 #include <hal/hal.h>
 #include <cstdint>
+#include <cstdio>
 
 namespace stackchan {
 
@@ -277,6 +279,17 @@ private:
     // the target is already smooth. Smoothness work in Phase 3 is therefore
     // about target SELECTION (delta size, cadence, pitch baseline) not about
     // adding a new easing engine.
+    static const char* profileName(IdleProfile p)
+    {
+        switch (p) {
+            case IdleProfile::NORMAL:         return "normal";
+            case IdleProfile::LOOKING_AROUND: return "looking_around";
+            case IdleProfile::SLEEPY:         return "sleepy";
+            case IdleProfile::SURVEILLANCE:   return "surveillance";
+        }
+        return "unknown";
+    }
+
     void perform_idle_motion(Modifiable& stackchan)
     {
         auto& motion = stackchan.motion();
@@ -286,6 +299,15 @@ private:
 
         const auto& p = paramsFor(_profile);
         int action    = Random::getInstance().getInt(0, 100);
+        const char* action_name =
+            (action < 60) ? "small_offset" :
+            (action < 85) ? "gentle_look"  :
+                            "return_to_center";
+        char ev_buf[96];
+        std::snprintf(ev_buf, sizeof(ev_buf),
+                      "{\"action\":\"%s\",\"profile\":\"%s\"}",
+                      action_name, profileName(_profile));
+        Application::GetInstance().SendEvent("idle_motion", ev_buf);
 
         if (action < 60) {
             // Action A: small offset from current — the "fidget" / "subtle
