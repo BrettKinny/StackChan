@@ -80,11 +80,13 @@ void SoundLocalizer::OnStereoFrame(const std::vector<int16_t>& interleaved_lr)
     const double balance = double(left_energy - right_energy) / double(total);
     const Direction dir  = Localize(balance);
 
-    // Only emit on direction CHANGE, so a sustained sound from one
-    // direction doesn't spam the bus.
-    if (dir == _last_dir) {
-        return;
-    }
+    // Direction-change gate removed 2026-04-27. It was filtering out
+    // legitimate clap events from the same side as the most recent
+    // emit (e.g. boot self-test fires `left`, then every clap from
+    // the left is silently dropped). The 750 ms cooldown alone bounds
+    // emit rate to ~1.3 events/sec, which handles the original spam
+    // concern for sustained sounds. _last_dir is no longer consulted
+    // for gating but kept around in case future logic needs it.
 
     const char* dir_str = (dir == Direction::Left)  ? "left"
                         : (dir == Direction::Right) ? "right"

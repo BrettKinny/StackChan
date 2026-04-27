@@ -73,7 +73,12 @@ private:
     float _hp_r_prev_y = 0.0f;
 
     static constexpr int64_t kCooldownUs       = 750000;   // 750 ms
-    static constexpr int64_t kEnergyThreshold  = 1000000000;  // ~30 dB above mic noise floor
+    // Halved 2026-04-27 from 1e9 → 5e8: the HPF added in 57e12cb (300 Hz
+    // cutoff for HVAC rejection) cut clap energy below the original
+    // threshold, so claps stopped firing sound_event entirely. 5e8 is a
+    // first-iteration guess — drop further if claps still don't trigger,
+    // raise if background chatter spams the bus.
+    static constexpr int64_t kEnergyThreshold  = 500000000;
     static constexpr double  kBalanceThreshold = 0.15;     // L vs R fraction
     // 1st-order HPF coefficient. ~300 Hz cutoff, -3 dB at 300 Hz, -6 dB/oct
     // rolloff below. Knocks out HVAC / fan rumble (typically <200 Hz dominant)
