@@ -51,6 +51,12 @@ void StateManager::setState(State next)
     _state_change_ms  = GetHAL().millis();
     _last_assert_ms   = 0;  // forces a pip repaint on the next _update tick
     mclog::tagInfo(_tag, "state {} -> {}", stateName(prev), stateName(next));
+    // Exit hook for the OUTGOING state runs FIRST, before we touch the new
+    // state's profile or entry hook. Security needs to tear down its pan task
+    // and release the motion lock before any successor state takes over.
+    if (prev == State::SECURITY) {
+        onExitSecurity();
+    }
     applyIdleProfile();
     // Phase 5 — sleep entry/exit edge hooks. Run AFTER applyIdleProfile so the
     // SLEEPY profile is already in place when we lock idle_motion out, and
@@ -60,6 +66,12 @@ void StateManager::setState(State next)
         onEnterSleep();
     } else if (prev == State::SLEEP) {
         onExitSleep();
+    }
+    // Security entry hook also runs after applyIdleProfile so the
+    // SURVEILLANCE profile is in place (the underlying default) before we
+    // take the lock; idle_motion stays locked out for the whole tenure.
+    if (next == State::SECURITY) {
+        onEnterSecurity();
     }
     emitStateChanged();
 }
@@ -134,10 +146,11 @@ void StateManager::onEnterSleep()
     //    profile via applyIdleProfile) doesn't issue micro-moves while we
     //    pose. Released in onExitSleep.
     sc.motion().setModifyLock(true);
-    // 3. Pose face-down + centred at slow speed. yaw=0, pitch=450 is the
-    //    high end of the SLEEPY profile's pitch_baseline, so it reads as
-    //    "head drooped" without overshooting servo limits.
-    sc.motion().moveWithSpeed(0, 450, 80);
+    // 3. Pose to home position (centre, neutral) at slow speed. goHome()
+    //    moves both servos to true home (yaw=0, pitch=0) — the same neutral
+    //    pose the device boots into. Reads as "Dotty has gone still" rather
+    //    than "Dotty is drooping", which is the deliberate feel for sleep.
+    sc.motion().goHome(80);
     // 4. Defer torque-release until the move settles — _update polls
     //    motion.isMoving() each tick and releases torque the moment it's
     //    safe. Torque-off mid-move would freeze the head wherever it
@@ -168,6 +181,132 @@ void StateManager::onExitSleep()
         sc.avatar().setSpeech("");
     }
     mclog::tagInfo(_tag, "sleep: woke; torque on, lock released, wake-pose initiated");
+}
+
+void StateManager::onEnterSecurity()
+{
+    auto& sc = ::GetStackChan();
+    // Avatar to angry — latches until onExitSecurity restores Neutral.
+    // Mirrors the sleep-mode pattern (Sleepy on enter, Neutral on exit).
+    if (sc.hasAvatar()) {
+        sc.avatar().setEmotion(avatar::Emotion::Angry);
+    }
+    // 1. Take the motion modify lock so idle_motion (now on SURVEILLANCE
+    //    profile) doesn't issue random ±500 yaw nudges over our deliberate
+    //    pan. Released in onExitSecurity. Refcounted lock — face_tracking /
+    //    StackChanCamera capture guards still nest inside us cleanly.
+    sc.motion().setModifyLock(true);
+    // 2. Spawn the pan worker. Idempotent: if a stale handle exists from a
+    //    racey re-entry, we tear it down first. Mirror of FaceDetector's
+    //    start/stop pattern (atomic _running flag + binary stop semaphore).
+    if (_security_task_handle != nullptr) {
+        mclog::tagWarn(_tag, "security: stale task handle on entry, tearing down");
+        _security_running.store(false, std::memory_order_release);
+        if (_security_stop_sem) {
+            xSemaphoreTake(_security_stop_sem, pdMS_TO_TICKS(2000));
+            vSemaphoreDelete(_security_stop_sem);
+            _security_stop_sem = nullptr;
+        }
+        _security_task_handle = nullptr;
+    }
+    _security_running.store(true, std::memory_order_release);
+    _security_stop_sem = xSemaphoreCreateBinary();
+    // 4 KB stack is plenty — the loop just calls motion APIs and sleeps.
+    // Pinned to Core 1 (same as the main task) to keep Core 0 free for the
+    // detector / audio pipelines. Priority 1 = same as face_det.
+    xTaskCreatePinnedToCore(securityPanTaskEntry, "sec_pan", 4096, this, 1,
+                             &_security_task_handle, 1);
+    mclog::tagInfo(_tag, "security: lock taken, pan task started");
+}
+
+void StateManager::onExitSecurity()
+{
+    auto& sc = ::GetStackChan();
+    // 1. Signal the worker to drop out, then wait up to 2 s for it to clear.
+    //    The worker checks _security_running between every sleep tick, so
+    //    typical exit latency is sub-second — but a long pan move in flight
+    //    (3 s settle) means the slow path can take up to ~4 s. 2 s is a
+    //    reasonable cap; if it expires we proceed anyway and rely on the
+    //    task's own vTaskDelete to land before the next entry.
+    _security_running.store(false, std::memory_order_release);
+    if (_security_stop_sem) {
+        xSemaphoreTake(_security_stop_sem, pdMS_TO_TICKS(2000));
+        vSemaphoreDelete(_security_stop_sem);
+        _security_stop_sem = nullptr;
+    }
+    _security_task_handle = nullptr;
+    // 2. Release the motion modify lock so the successor state's idle /
+    //    chat / dance overlays can drive the head again.
+    sc.motion().setModifyLock(false);
+    // 3. Return the head to neutral. goHome() rather than a deliberate
+    //    moveWithSpeed so the next state takes over from a known pose.
+    sc.motion().goHome(80);
+    // 4. Restore neutral expression (was latched Angry on entry).
+    if (sc.hasAvatar()) {
+        sc.avatar().setEmotion(avatar::Emotion::Neutral);
+    }
+    mclog::tagInfo(_tag, "security: pan task stopped, lock released, head to home");
+}
+
+void StateManager::securityPanTaskEntry(void* arg)
+{
+    auto* self = static_cast<StateManager*>(arg);
+    self->runSecurityPanLoop();
+    if (self->_security_stop_sem) {
+        xSemaphoreGive(self->_security_stop_sem);
+    }
+    vTaskDelete(nullptr);
+}
+
+void StateManager::runSecurityPanLoop()
+{
+    // Methodical surveillance sweep. Each leg moves at speed 50 (slow) and
+    // sleeps ~3 s for the move to settle, then dwells 1 s at the extreme
+    // before the next leg. Full cycle: -500 → +500 → 0 → pause = ~14 s.
+    // We re-check _security_running between every step so an exit during
+    // a pan or dwell drops out within at most one settle (3 s).
+    //
+    // Magnitudes: ±500 matches the SURVEILLANCE profile's yaw amplitude
+    // (idle_motion uses ±500 in this same band, so we stay within the
+    // visually sensible scan range for the pose).
+    auto& sc = ::GetStackChan();
+    auto check_running = [this]() {
+        return _security_running.load(std::memory_order_acquire);
+    };
+    // Sleep helper that yields in ~50 ms slices so we drop out promptly.
+    auto sleep_ms = [&check_running](uint32_t total_ms) {
+        const uint32_t slice = 50;
+        uint32_t elapsed = 0;
+        while (elapsed < total_ms && check_running()) {
+            uint32_t step = (total_ms - elapsed) < slice ? (total_ms - elapsed) : slice;
+            vTaskDelay(pdMS_TO_TICKS(step));
+            elapsed += step;
+        }
+    };
+
+    while (check_running()) {
+        // Leg 1 — full left.
+        sc.motion().moveWithSpeed(-500, 0, 50);
+        sleep_ms(3000);
+        if (!check_running()) break;
+        sleep_ms(1000);  // dwell at extreme
+        if (!check_running()) break;
+
+        // Leg 2 — full right.
+        sc.motion().moveWithSpeed(500, 0, 50);
+        sleep_ms(3000);
+        if (!check_running()) break;
+        sleep_ms(1000);  // dwell at extreme
+        if (!check_running()) break;
+
+        // Leg 3 — back to centre, then a longer 4 s pause before repeating
+        // gives the cadence its "heads up, scanning" rhythm rather than
+        // continuous churn.
+        sc.motion().moveWithSpeed(0, 0, 50);
+        sleep_ms(3000);
+        if (!check_running()) break;
+        sleep_ms(4000);
+    }
 }
 
 void StateManager::applyIdleProfile()
