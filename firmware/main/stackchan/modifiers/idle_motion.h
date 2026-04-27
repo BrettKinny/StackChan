@@ -87,12 +87,16 @@ public:
             _next_tick = now + Random::getInstance().getInt(
                                    _tracking_overlay_min_ms, _tracking_overlay_max_ms);
         } else {
-            // Exiting tracking mode (face lost / grace expired) — kick the
-            // next idle action soon so the head doesn't sit dead-eyed for
-            // a full 4–8 s. Stamp _last_tracking_active_ms so the empty-room
-            // timer counts from the moment the face left, not from boot.
+            // Exiting tracking mode (face lost / grace expired). The pre-
+            // Phase-3 hop was `_next_tick = now + 500` to wake an idle action
+            // quickly. With Phase 3's slower cadence + profile-shaped ranges
+            // that 500 ms hop produces a "big move away" the moment the user
+            // walks out of frame after a photo — they haven't finished moving
+            // and Dotty is already panning to a new gentle-look target. Use
+            // the normal cadence so the head settles for the full window
+            // before the first post-face-lost idle action fires.
             _last_tracking_active_ms = now;
-            _next_tick = now + 500;
+            _next_tick = now + Random::getInstance().getInt(_interval_min, _interval_max);
         }
     }
 

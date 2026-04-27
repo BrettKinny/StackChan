@@ -8,6 +8,7 @@
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
 #include <stackchan/privacy/privacy_leds.h>
+#include <stackchan/modes/state_manager.h>
 #include <hal/board/hal_bridge.h>
 #include <apps/common/common.h>
 #include <board.h>          // Board::GetInstance() — privacy LED step 3
@@ -137,6 +138,62 @@ void Hal::xiaozhi_mcp_init()
                 GetStackChan().rightNeonLight().setColorAt(static_cast<uint8_t>(index - 6), r, g, b);
             }
 
+            return true;
+        });
+
+    mclog::tagInfo(_tag, "add robot.set_state tool");
+    mcp_server.AddTool(
+        "self.robot.set_state",
+        "Set Dotty's high-level state. Mutually exclusive — exactly one is active. "
+        "Valid: idle, talk, story_time, security, sleep, dance. Drives the state pip "
+        "on left ring index 0 and the idle-motion profile.",
+        PropertyList({Property("state", kPropertyTypeString, std::string("idle"))}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            std::string s = properties["state"].value<std::string>();
+            stackchan::State out;
+            if (!stackchan::StateManager::parseState(s.c_str(), out)) {
+                mclog::tagWarn(_tag, "set_state: unknown state {}", s);
+                return false;
+            }
+            auto* sm = static_cast<stackchan::StateManager*>(
+                GetStackChan().getModifierByName(stackchan::StateManager::kName));
+            if (!sm) {
+                mclog::tagWarn(_tag, "set_state: StateManager not found in modifier pool");
+                return false;
+            }
+            mclog::tagInfo(_tag, "set_state: {}", s);
+            LvglLockGuard lock;
+            sm->setState(out);
+            return true;
+        });
+
+    mclog::tagInfo(_tag, "add robot.set_toggle tool");
+    mcp_server.AddTool(
+        "self.robot.set_toggle",
+        "Set a Dotty toggle on/off. Toggles compose freely with state. "
+        "Valid names: kid_mode (warm pink pip on right ring index 8), "
+        "smart_mode (orange pip on right ring index 9).",
+        PropertyList({Property("name", kPropertyTypeString, std::string("")),
+                      Property("enabled", kPropertyTypeBoolean, false)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            std::string name = properties["name"].value<std::string>();
+            bool enabled     = properties["enabled"].value<bool>();
+            auto* sm = static_cast<stackchan::StateManager*>(
+                GetStackChan().getModifierByName(stackchan::StateManager::kName));
+            if (!sm) {
+                mclog::tagWarn(_tag, "set_toggle: StateManager not found in modifier pool");
+                return false;
+            }
+            mclog::tagInfo(_tag, "set_toggle: {}={}", name, enabled);
+            LvglLockGuard lock;
+            if (name == "kid_mode") {
+                sm->setKidMode(enabled);
+            } else if (name == "smart_mode") {
+                sm->setSmartMode(enabled);
+            } else {
+                mclog::tagWarn(_tag, "set_toggle: unknown name {}", name);
+                return false;
+            }
             return true;
         });
 

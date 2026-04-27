@@ -6,6 +6,7 @@
 #include "face_tracking.h"
 #include "../stackchan.h"
 #include "idle_motion.h"
+#include "../modes/state_manager.h"  // Phase 4: IDLE <-> TALK transitions
 #include "application.h"  // Phase 1.2: server-bound perception events
 #include <hal/board/hal_bridge.h>
 #include <hal/board/stackchan_camera.h>
@@ -201,6 +202,15 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                     _capture_guard_acquired_ms = now;
                 }
                 Application::GetInstance().SendEvent("face_detected", "{}");
+                // Phase 4 — transition IDLE -> TALK locally so the state pip
+                // updates immediately, without waiting on the bridge round-trip.
+                // StateManager itself decides whether to act (sticky states like
+                // STORY_TIME / SECURITY / SLEEP / DANCE are intentionally
+                // unaffected by camera edges).
+                if (auto* sm = static_cast<StateManager*>(
+                        ::GetStackChan().getModifierByName(StateManager::kName))) {
+                    sm->onFaceDetected();
+                }
                 // Open the mic on face acquisition — same path as a
                 // wake-word detection. The device transitions to
                 // Listening (auto-stop / VAD-driven), so a short
@@ -255,6 +265,13 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                     ESP_LOGI(TAG, "capture-pending guard released (face_lost)");
                 }
                 Application::GetInstance().SendEvent("face_lost", "{}");
+                // Phase 4 — transition TALK -> IDLE on grace expiry. STORY_TIME /
+                // SECURITY / SLEEP / DANCE all stay sticky here; they have their
+                // own exit triggers.
+                if (auto* sm = static_cast<StateManager*>(
+                        ::GetStackChan().getModifierByName(StateManager::kName))) {
+                    sm->onFaceLost();
+                }
             }
             break;
     }

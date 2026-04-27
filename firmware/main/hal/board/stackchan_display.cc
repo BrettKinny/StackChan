@@ -18,6 +18,7 @@
 #include <stackchan/face/face_detector.h>
 #include <stackchan/sound_localizer.h>
 #include <stackchan/avatar/decorators/decorators.h>
+#include <stackchan/modes/state_manager.h>
 #include "application.h"
 #include <assets/lang_config.h>
 #include <hal/hal.h>
@@ -305,6 +306,10 @@ void StackChanAvatarDisplay::SetupUI()
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
     stackchan.addModifier(std::make_unique<ImuEventModifier>());
+    // High-level state supervisor — owns the state pip (left ring 0) and
+    // toggle pips (right ring 8/9). Lives across all chat states. Phases 5-8
+    // wire behavioural side-effects (sleep / security / story_time / ambient).
+    stackchan.addModifier(std::make_unique<stackchan::StateManager>());
 
     preview_image_ = lv_image_create(lv_screen_active());
     lv_obj_set_size(preview_image_, 320, 240);
