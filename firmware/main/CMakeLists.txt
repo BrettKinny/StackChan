@@ -1,7 +1,7 @@
 # Define xiaozhi source directory
 set(XIAOZHI_MAIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xiaozhi-esp32/main")
 
-file(GLOB_RECURSE STACK_CHAN_SOURCES CONFIGURE_DEPENDS
+file(GLOB_RECURSE STACK_CHAN_SOURCES
     "apps/app_launcher/*.c" "apps/app_launcher/*.cc" "apps/app_launcher/*.cpp"
     "apps/app_setup/*.c" "apps/app_setup/*.cc" "apps/app_setup/*.cpp"
     "apps/common/*.c" "apps/common/*.cc" "apps/common/*.cpp"
@@ -15,6 +15,13 @@ file(GLOB_RECURSE STACK_CHAN_SOURCES CONFIGURE_DEPENDS
     "stackchan/*.cc"
     "stackchan/*.cpp"
 )
+# NOTE: CONFIGURE_DEPENDS is intentionally OFF here. ESP-IDF evaluates
+# component CMakeLists.txt in script mode during the requirements phase
+# (component_get_requirements.cmake), and CONFIGURE_DEPENDS is rejected
+# in script mode ("CONFIGURE_DEPENDS is invalid for script and find
+# package modes"). The only safe workflow when adding a brand-new .cpp
+# file under main/ is `idf.py reconfigure && idf.py build` so the GLOB
+# re-runs at configure time. See dotty-flash-firmware build-errors.md.
 set(STACK_CHAN_INCLUDE_DIRS 
     "."
 )
