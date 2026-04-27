@@ -5,8 +5,7 @@
  */
 #include "hal.h"
 #include <stackchan/stackchan.h>
-#include <stackchan/privacy/camera_peripheral_guard.h>
-#include <stackchan/privacy/privacy_leds.h>
+#include <stackchan/camera/camera_stream_guard.h>
 #include <memory>
 #include "board/hal_bridge.h"
 #include <mooncake.h>
@@ -57,13 +56,10 @@ public:
         DanceSequence     = 0x14,
         StartAudioStream  = 0x18,
         StopAudioStream   = 0x19,
-        // 0x1A — Privacy LED upload-start / upload-end signal driven by
-        // the bridge. Payload is a JSON object: {"mic": "upload_start" |
-        // "upload_end" | "none", "camera": "upload_start" | "upload_end"
-        // | "none"}. Either field may be omitted; missing fields are
-        // treated as "none" (no change). This is how the bridge tells
-        // the firmware "data is now leaving the LAN" so we can pulse the
-        // corresponding privacy LED.
+        // 0x1A — was the bridge-driven privacy LED pulse signal
+        // (mic WAN-bound / camera uploading). Privacy LED semantics were
+        // dropped in 2026-04-27; the bridge no longer sends this. The
+        // value is reserved so the protocol numbering stays stable.
         Privacy           = 0x1A,
     };
 
@@ -219,14 +215,13 @@ public:
                 // }
                 case DataType::StartCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Start Camera Stream");
-                    GetHAL().setCameraLedActive(true);
-                    // Privacy LED step 4: hold a CameraPeripheralGuard
-                    // for the entire avatar-stream lifetime. This brings
-                    // the V4L2 stream up via the same refcount path as
-                    // FaceDetector / Capture, so simultaneous consumers
-                    // keep the stream alive without churn.
+                    // Hold a CameraStreamGuard for the entire avatar-
+                    // stream lifetime. This brings the V4L2 stream up
+                    // via the same refcount path as FaceDetector /
+                    // Capture, so simultaneous consumers keep the stream
+                    // alive without churn.
                     if (!_camera_guard) {
-                        _camera_guard = std::make_unique<stackchan::privacy::CameraPeripheralGuard>();
+                        _camera_guard = std::make_unique<stackchan::camera::CameraStreamGuard>();
                     }
                     setStreamingEnabled(true);
                     _websocket->Send("camera stream started");
@@ -234,7 +229,6 @@ public:
                 }
                 case DataType::StopCameraStream: {
                     ESP_LOGI(_tag.c_str(), "Stop Camera Stream");
-                    GetHAL().setCameraLedActive(false);
                     setStreamingEnabled(false);
                     _camera_guard.reset();
                     _websocket->Send("camera stream stopped");
@@ -384,54 +378,10 @@ public:
                 case DataType::StopAudioStream: {
                     break;
                 }
-                case DataType::Privacy: {
-                    // Protocol: [Type(1)] [Length(4)] [Payload (JSON)]
-                    // Payload: {"mic": "upload_start" | "upload_end" | "none",
-                    //           "camera": "upload_start" | "upload_end" | "none"}
-                    // Either field may be omitted. The handler routes to
-                    // PrivacyLeds::setMicWanBound / setCameraUploading,
-                    // which preserve the friend-class invariant (only
-                    // PrivacyLeds writes the privacy pixels). Failsafe
-                    // 2 s timeout in update() guards against a missing
-                    // upload_end (bridge crash mid-upload).
-                    if (msg.data.size() < 5) break;
-                    std::string payload(msg.data.begin() + 5, msg.data.end());
-                    ESP_LOGI(_tag.c_str(), "Privacy Payload: %s", payload.c_str());
-                    ArduinoJson::JsonDocument doc;
-                    auto err = ArduinoJson::deserializeJson(doc, payload);
-                    if (err) {
-                        ESP_LOGE(_tag.c_str(), "Privacy: bad JSON: %s", err.c_str());
-                        break;
-                    }
-                    auto apply = [](const char* field, std::string_view val,
-                                    void (*setter)(bool)) {
-                        if (val == "upload_start") {
-                            setter(true);
-                        } else if (val == "upload_end") {
-                            setter(false);
-                        } else if (val == "none" || val.empty()) {
-                            // explicit no-op
-                        } else {
-                            ESP_LOGW(_tag.c_str(), "Privacy: unknown %s value: %.*s",
-                                     field, (int)val.size(), val.data());
-                        }
-                    };
-                    if (doc["mic"].is<std::string>()) {
-                        apply("mic", doc["mic"].as<std::string>(),
-                              [](bool a) {
-                                  stackchan::privacy::PrivacyLeds::getInstance()
-                                      .setMicWanBound(a);
-                              });
-                    }
-                    if (doc["camera"].is<std::string>()) {
-                        apply("camera", doc["camera"].as<std::string>(),
-                              [](bool a) {
-                                  stackchan::privacy::PrivacyLeds::getInstance()
-                                      .setCameraUploading(a);
-                              });
-                    }
-                    break;
-                }
+                // DataType::Privacy was the bridge-driven privacy LED
+                // pulse hook (mic WAN-bound / camera uploading). Privacy
+                // LED semantics were dropped in 2026-04-27 — see
+                // docs/modes.md. The bridge no longer sends this packet.
                 default:
                     break;
             }
@@ -504,9 +454,8 @@ private:
     bool _is_video_mode              = false;
     // Held while the WS peer has the avatar camera stream open. Refcount
     // composes with FaceDetector + Capture guards so the V4L2 stream
-    // stays up across all consumers and the privacy LED tracks "any
-    // consumer is reading frames" rather than any single code path.
-    std::unique_ptr<stackchan::privacy::CameraPeripheralGuard> _camera_guard;
+    // stays up across all consumers.
+    std::unique_ptr<stackchan::camera::CameraStreamGuard> _camera_guard;
     std::mutex _mutex;
     std::queue<ReceivedMessage> _msg_queue;
 

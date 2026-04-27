@@ -7,12 +7,9 @@
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
-#include <stackchan/privacy/privacy_leds.h>
 #include <stackchan/modes/state_manager.h>
 #include <hal/board/hal_bridge.h>
 #include <apps/common/common.h>
-#include <board.h>          // Board::GetInstance() — privacy LED step 3
-#include <audio_codec.h>     // AudioCodec::input_enabled() — privacy LED step 3
 
 using namespace stackchan;
 
@@ -118,16 +115,6 @@ void Hal::xiaozhi_mcp_init()
                 return false;
             }
 
-            // These indices are hardware-guaranteed privacy indicators (mic/camera state).
-            // The MCP server-side LLM is NOT trusted with overwriting them. PrivacyLeds::update()
-            // re-asserts every tick (~20ms), so a write here would only cause a transient flicker,
-            // but we reject outright to keep the privacy pixels owned by the peripheral-enable
-            // code path (mic_peripheral_guard / camera_peripheral_guard) alone.
-            if (index == privacy::kMicLedIndex || index == privacy::kCameraLedIndex) {
-                mclog::tagWarn(_tag, "set_led_multi: index reserved for privacy LED: {}", index);
-                return false;
-            }
-
             mclog::tagInfo(_tag, "set_led_multi: index={}, r={}, g={}, b={}", index, r, g, b);
 
             LvglLockGuard lock;
@@ -145,8 +132,8 @@ void Hal::xiaozhi_mcp_init()
     mcp_server.AddTool(
         "self.robot.set_state",
         "Set Dotty's high-level state. Mutually exclusive — exactly one is active. "
-        "Valid: idle, talk, story_time, security, sleep, dance. Drives the state pip "
-        "on left ring index 0 and the idle-motion profile.",
+        "Valid: idle, talk, story_time, security, sleep, dance. Paints the state "
+        "arc across left ring 0-5 and selects the idle-motion profile.",
         PropertyList({Property("state", kPropertyTypeString, std::string("idle"))}),
         [this](const PropertyList& properties) -> ReturnValue {
             std::string s = properties["state"].value<std::string>();
@@ -195,59 +182,6 @@ void Hal::xiaozhi_mcp_init()
                 return false;
             }
             return true;
-        });
-
-    mclog::tagInfo(_tag, "add robot.get_privacy_state tool");
-    mcp_server.AddTool(
-        "self.robot.get_privacy_state",
-        "READ-ONLY. Returns BOTH the LED intent AND the underlying peripheral truth. "
-        "mic = 'off' | 'local' | 'wan_bound' (off = mic ADC closed; local = ADC on but audio is "
-        "staying on-device; wan_bound = ADC on AND audio is crossing the LAN boundary to a cloud "
-        "ASR / LLM — pulses to alert the operator). "
-        "camera = 'off' | 'active' | 'uploading' (off = no consumer reading frames; active = a "
-        "consumer is dequeuing frames locally; uploading = frames are crossing the LAN boundary "
-        "to a cloud vision API — pulses to alert the operator). "
-        "mic_peripheral_open = true iff the audio codec input device is currently open. "
-        "camera_peripheral_streaming = true iff the camera driver is in a streamable state "
-        "(placeholder true-always until step 4-5 wires V4L2 truth). "
-        "last_capture_ts_ms = millis-since-boot of the last Capture() call (0 = never). "
-        "This tool CANNOT change the LEDs — they are hardware-tied to the actual peripheral state.",
-        std::vector<Property>{},
-        [this](const PropertyList& properties) -> ReturnValue {
-            const char* mic_str = "off";
-            switch (privacy::PrivacyLeds::getInstance().micState()) {
-                case privacy::MicState::Off:      mic_str = "off"; break;
-                case privacy::MicState::Local:    mic_str = "local"; break;
-                case privacy::MicState::WanBound: mic_str = "wan_bound"; break;
-            }
-            const char* cam_str = "off";
-            switch (privacy::PrivacyLeds::getInstance().cameraState()) {
-                case privacy::CameraState::Off:       cam_str = "off"; break;
-                case privacy::CameraState::Active:    cam_str = "active"; break;
-                case privacy::CameraState::Uploading: cam_str = "uploading"; break;
-            }
-
-            // Peripheral-level truth. Independent of LED intent so the
-            // bridge can alarm if the two diverge (e.g. STREAMON issued
-            // but ISP still warming after step 4-5 lands).
-            bool mic_open = false;
-            if (auto* codec = Board::GetInstance().GetAudioCodec()) {
-                mic_open = codec->input_enabled();
-            }
-            bool cam_streaming = false;
-            uint32_t last_cap_ms = 0;
-            if (auto* cam = hal_bridge::board_get_camera()) {
-                cam_streaming = cam->isStreaming();
-                last_cap_ms   = cam->lastCaptureTimestampMs();
-            }
-            auto result = fmt::format(
-                R"({{"mic": "{}", "camera": "{}", "mic_peripheral_open": {}, "camera_peripheral_streaming": {}, "last_capture_ts_ms": {}}})",
-                mic_str, cam_str,
-                mic_open ? "true" : "false",
-                cam_streaming ? "true" : "false",
-                last_cap_ms);
-            mclog::tagInfo(_tag, "get_privacy_state: {}", result);
-            return result;
         });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");

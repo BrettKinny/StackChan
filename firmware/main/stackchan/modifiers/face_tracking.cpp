@@ -176,7 +176,6 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 // we (re-)acquire a face after an idle gap.
                 _last_cmd_valid = false;
                 setIdleTrackingMode(true);
-                setTrackingLed(stackchan, true);
                 // Acquire capture-pending guard BEFORE emitting face_detected
                 // so the head is already locked by the time the bridge sees
                 // the event and dispatches its take_photo MCP call. The guard
@@ -254,7 +253,6 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 _state = State::Idle;
                 _last_cmd_valid = false;
                 setIdleTrackingMode(false);
-                setTrackingLed(stackchan, false);
                 // Release capture-pending guard if take_photo never arrived
                 // before the user walked away. Capturing a frame of empty
                 // wall is the exact failure mode this guard is trying to
@@ -335,17 +333,6 @@ void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
     _last_cmd_y = _smooth_y;
     _last_cmd_valid = true;
     _phase0_cmd++;  // Phase 0 instrumentation — count actually-issued commands.
-}
-
-void FaceTrackingModifier::setTrackingLed(Modifiable& stackchan, bool on)
-{
-    // Left LED green = face currently detected.
-    // Right LED cyan (mode-active) is managed by stackchan_display, not here.
-    if (on) {
-        stackchan.leftNeonLight().setColor(0, 168, 0);
-    } else {
-        stackchan.leftNeonLight().setColor(0, 0, 0);
-    }
 }
 
 FaceTrackingModifier::~FaceTrackingModifier()

@@ -335,10 +335,16 @@ void StackChanAvatarDisplay::LvglUnlock()
     Unlock();
 }
 
-static void set_left_leds(uint8_t r, uint8_t g, uint8_t b)
+// Listening indicator at right-ring index 6 (top of right ring). Lit
+// red while xiaozhi's chat sub-state is LISTENING (mic open, ASR active,
+// user's turn to speak); off otherwise. Thinking and speaking are
+// conveyed by face animations only — the LED is a turn-taking signal.
+static void set_listening_pixel(bool on)
 {
-    for (int i = 0; i < 6; i++) {
-        GetHAL().setRgbColor(i, r, g, b);
+    if (on) {
+        GetHAL().setRgbColor(6, 120, 0, 0);
+    } else {
+        GetHAL().setRgbColor(6, 0, 0, 0);
     }
     GetHAL().refreshRgb();
 }
@@ -382,7 +388,6 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
             stackchan.removeModifier(face_tracking_modifier_id_);
             face_tracking_modifier_id_ = -1;
         }
-        stackchan.rightNeonLight().setColor(0, 0, 0);
 
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -410,10 +415,9 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
             thinking_modifier_id_ = stackchan.addModifier(std::make_unique<ThinkingModifier>());
         }
 
-        if (in_listening_status_) {
-            thinking_led_pending_ = true;
-            set_left_leds(50, 25, 0);
-        }
+        // The doubt face-overlay fires while xiaozhi is still in LISTENING
+        // — keep the listening pixel lit so the turn-taking signal stays
+        // honest. The thinking emotion lives on the face only.
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
     } else if (strcmp(emotion, "surprised") == 0) {
@@ -427,12 +431,10 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         love_decorator_id_ = avatar.addDecorator(
             std::make_unique<HeartDecorator>(lv_screen_active(), 4000, 500));
     } else {
-        // Brief magenta pip on the left ring is a visible signal that an
-        // unrecognised emotion arrived — otherwise this branch is silent and
-        // future emoji additions can regress invisibly. The LED gets
-        // overwritten by the next state-change; the warning log persists.
+        // Unrecognised emotion — log loudly so future emoji additions
+        // surface. The state arc on the left ring is owned by StateManager;
+        // we don't paint a fallback LED from here.
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
-        set_left_leds(40, 0, 40);
         avatar.setEmotion(Emotion::Neutral);
     }
 
@@ -597,7 +599,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
 
         thinking_led_pending_ = false;
-        set_left_leds(0, 50, 0);
+        set_listening_pixel(true);
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
@@ -623,7 +625,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             thinking_modifier_id_ = -1;
         }
 
-        set_left_leds(0, 0, 0);
+        set_listening_pixel(false);
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
@@ -644,7 +646,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         esp_timer_stop(bubble_clear_timer_);
 
-        set_left_leds(0, 0, 50);
+        set_listening_pixel(false);
     } else {
         avatar.setSpeech(status);
     }
@@ -667,16 +669,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = stackchan.addModifier(
                 std::make_unique<IdleExpressionModifier>());
         }
-        // Right ring middle pixels (8-10) stay dark in idle. The previous
-        // always-on cyan "face-detection mode active" indicator was visual
-        // noise — face detector is now permanently on (since fix `8d74dd7`
-        // decoupled it from chat state) so a continuous indicator carried
-        // no actionable signal. The privacy LEDs at indices 6 and 11 already
-        // give the family the "is the camera on?" answer (red on index 11).
-        // Future: tie indices 8-10 to face_tracking state (green when a
-        // face is actively being tracked) — that's the "is Dotty looking
-        // at me right now?" signal worth lighting.
-        stackchan.rightNeonLight().setColor(0, 0, 0);
+        // Right-ring listening pixel is owned by set_listening_pixel()
+        // above and the toggle pips at 8/9 are owned by StateManager —
+        // nothing to clear from here.
 
         // Phase 1.2: register the ambient sound localizer once. Its
         // callback fires from the audio input task whenever stereo
@@ -702,9 +697,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             stackchan.removeModifier(idle_expression_modifier_id_);
             idle_expression_modifier_id_ = -1;
         }
-        // Clear cyan mode-active LED. The left LED is owned by the chat-state
-        // set_left_leds() call earlier in this function, so don't touch it here.
-        stackchan.rightNeonLight().setColor(0, 0, 0);
+        // The left ring is the state arc (owned by StateManager) and the
+        // right-ring listening pixel + toggle pips are owned by their
+        // respective controllers — nothing to clear from here.
     }
 
     // Clear sleep state

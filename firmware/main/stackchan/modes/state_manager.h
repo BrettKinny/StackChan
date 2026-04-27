@@ -26,13 +26,15 @@ enum class State {
 };
 
 // StateManager owns the high-level mode for the device:
-//   - State pip on left ring index 0   (mutually exclusive state colour).
-//   - Toggle pips on right ring 8 / 9  (kid_mode warm pink, smart_mode orange).
-//   - IdleMotionModifier::IdleProfile  (NORMAL / SURVEILLANCE / SLEEPY).
+//   - State arc on left ring 0-5      (all 6 pixels paint the state colour).
+//   - Toggle pips on right ring 8 / 9 (kid_mode warm pink, smart_mode orange).
+//   - IdleMotionModifier::IdleProfile (NORMAL / SURVEILLANCE / SLEEPY).
 //   - "state_changed" perception event for bridge consumers.
 //
-// The pips are re-asserted at 5 Hz so chat-state full-ring writes (LISTENING /
-// SPEAKING / STANDBY in stackchan_display.cc) don't permanently clobber them.
+// The 5 Hz tick drives the SECURITY 1 Hz flash and acts as defense-in-depth
+// re-assert. Chat-state writes (set_left_leds in stackchan_display.cc) no
+// longer touch the left ring — that hook now drives only the right-ring
+// listening pixel at index 6.
 //
 // face_tracking calls onFaceDetected / onFaceLost on detection edges so the
 // IDLE <-> TALK transitions happen at the camera, not via the bridge round-trip.
@@ -41,9 +43,9 @@ public:
     static constexpr const char* kName = "state_manager";
 
     // LED indices in the GLOBAL 12-pixel ring (left 0-5, right 6-11).
-    // RightNeonLight uses LOCAL 0-5 internally and adds 6 — see
+    // The state arc paints all 6 left pixels, so no left-ring index constant
+    // is needed. RightNeonLight uses LOCAL 0-5 internally and adds 6 — see
     // neon_light.cpp:103-112 — so the right-ring writes use local indices.
-    static constexpr uint8_t kStatePipLeftIndex      = 0;  // global 0
     static constexpr uint8_t kKidModePipRightLocal   = 2;  // global 8
     static constexpr uint8_t kSmartModePipRightLocal = 3;  // global 9
 

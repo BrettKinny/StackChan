@@ -348,24 +348,31 @@ void StateManager::emitStateChanged()
 
 void StateManager::writePips(Modifiable& stackchan, uint32_t now)
 {
-    // ---- State pip on left ring global 0 ----
-    uint8_t r = 0, g = 0, b = 0;
-    switch (_state) {
-        case State::IDLE:       r = 0;   g = 0;   b = 0;  break;  // off
-        case State::TALK:       r = 0;   g = 40;  b = 60; break;  // dim cyan
-        case State::STORY_TIME: r = 100; g = 40;  b = 0;  break;  // warm
-        case State::SLEEP:      r = 0;   g = 0;   b = 16; break;  // very dim blue
-        case State::DANCE:      r = 0;   g = 0;   b = 0;  break;  // suppressed (rainbow takes over)
-        case State::SECURITY: {
-            // 1 Hz flash. Phase computed from time-since-state-entry so the
-            // flash starts at "on" the moment SECURITY is entered.
-            uint32_t age = now - _state_change_ms;
-            bool     on  = ((age / kSecurityFlashHalfMs) % 2) == 0;
-            if (on) { r = 80; g = 80; b = 80; }
-            break;
+    // ---- State arc on left ring global 0-5 ----
+    // Dance owns the left ring directly via its animation timeline (rainbow
+    // sweep) so we skip writing during DANCE — otherwise we'd clobber the
+    // rainbow with state colour on every tick.
+    if (_state != State::DANCE) {
+        uint8_t r = 0, g = 0, b = 0;
+        switch (_state) {
+            case State::IDLE:       r = 0;   g = 0;   b = 0;  break;  // off
+            case State::TALK:       r = 0;   g = 60;  b = 0;  break;  // dim green
+            case State::STORY_TIME: r = 100; g = 40;  b = 0;  break;  // warm
+            case State::SLEEP:      r = 0;   g = 0;   b = 16; break;  // very dim blue
+            case State::DANCE:      break;  // unreachable — guarded above
+            case State::SECURITY: {
+                // 1 Hz flash. Phase computed from time-since-state-entry so the
+                // flash starts at "on" the moment SECURITY is entered.
+                uint32_t age = now - _state_change_ms;
+                bool     on  = ((age / kSecurityFlashHalfMs) % 2) == 0;
+                if (on) { r = 80; g = 80; b = 80; }
+                break;
+            }
+        }
+        for (uint8_t i = 0; i < 6; ++i) {
+            stackchan.leftNeonLight().setColorAt(i, r, g, b);
         }
     }
-    stackchan.leftNeonLight().setColorAt(kStatePipLeftIndex, r, g, b);
 
     // ---- Toggle pips on right ring (global 8 = local 2, global 9 = local 3) ----
     if (_kid_mode) {

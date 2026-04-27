@@ -6,7 +6,7 @@
 #include "face_detector.h"
 #include "face_detection_result.h"
 #include "camera_arbiter.h"
-#include <stackchan/privacy/camera_peripheral_guard.h>
+#include <stackchan/camera/camera_stream_guard.h>
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -124,17 +124,12 @@ void FaceDetector::taskEntry(void* arg)
             continue;
         }
 
-        // Privacy LED: hold camera-active for the ENTIRE _enabled period,
-        // not per-frame. Without this, the 50 ms vTaskDelay between
-        // processFrame cycles makes the red privacy LED visibly flicker
-        // at the inference cadence (~3 Hz), and the optical cross-talk
-        // makes the adjacent green mic LED look like it's also flickering.
-        // Inner loop runs while _enabled (and _running) stay true; guard
-        // dtor fires when either flips false → setCameraState(Off) once.
-        // Step 4-5 (refcounted CameraPeripheralGuard tied to STREAMON)
-        // replaces this with the proper privacy invariant.
+        // Hold the V4L2 stream up for the ENTIRE _enabled period via the
+        // refcounted stream guard, not per-frame. Inner loop runs while
+        // _enabled (and _running) stay true; guard dtor fires when either
+        // flips false and tears the stream down on the last consumer out.
         {
-            stackchan::privacy::CameraPeripheralGuard detector_active_guard;
+            stackchan::camera::CameraStreamGuard detector_active_guard;
             while (self->_enabled.load(std::memory_order_acquire) &&
                    self->_running.load(std::memory_order_acquire)) {
                 self->processFrame();

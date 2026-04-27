@@ -172,11 +172,11 @@ void HeadPetModifier::perform_pet_motion(Modifiable& stackchan)
 
 void HeadPetModifier::flashWakeFeedback(Modifiable& stackchan)
 {
-    // Same green as FaceTrackingModifier::setTrackingLed — single source of
-    // visual truth for "device is now in a listen-y state". One frame is
-    // enough; the listen-state LED policy in stackchan_display will repaint
-    // immediately when the WS transitions to Listening.
-    stackchan.leftNeonLight().setColor(0, 168, 0);
+    // The state arc on the left ring is owned by StateManager — head-pet
+    // wake feedback is conveyed by the avatar (sleepy → neutral) and the
+    // wake-tilt motion. No LED flash needed; an unannounced clobber would
+    // fight StateManager's 5 Hz re-assert anyway.
+    (void)stackchan;
 }
 
 }  // namespace stackchan

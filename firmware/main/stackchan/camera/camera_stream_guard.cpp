@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "camera_peripheral_guard.h"
+#include "camera_stream_guard.h"
 
 #include <atomic>
 #include <cstdint>
@@ -15,11 +15,11 @@
 #include <hal/board/hal_bridge.h>
 #include <hal/board/stackchan_camera.h>
 
-namespace stackchan::privacy {
+namespace stackchan::camera {
 
 namespace {
 
-constexpr const char* kTag = "CameraPeripheralGuard";
+constexpr const char* kTag = "CameraStreamGuard";
 
 // Recursive mutex serialises refcount transitions and the corresponding
 // startStreaming()/stopStreaming() calls. Recursive so a task that
@@ -37,15 +37,11 @@ std::atomic<uint32_t> g_refcount{0};
 
 }  // namespace
 
-CameraPeripheralGuard::CameraPeripheralGuard()
+CameraStreamGuard::CameraStreamGuard()
 {
     SemaphoreHandle_t m = lifecycleMutex();
     if (m == nullptr) {
-        // Mutex creation failed: degrade gracefully to LED-only behaviour
-        // so the privacy indicator still lights, even though refcount
-        // serialisation is gone.
-        ESP_LOGE(kTag, "lifecycle mutex unavailable; LED-only fallback");
-        PrivacyLeds::getInstance().setCameraState(CameraState::Active);
+        ESP_LOGE(kTag, "lifecycle mutex unavailable; stream lifecycle skipped");
         return;
     }
 
@@ -55,21 +51,19 @@ CameraPeripheralGuard::CameraPeripheralGuard()
         // 0 → 1: first consumer in; bring the V4L2 stream up.
         if (auto* cam = hal_bridge::board_get_camera()) {
             if (!cam->startStreaming()) {
-                ESP_LOGE(kTag, "startStreaming failed; LED will reflect intent only");
+                ESP_LOGE(kTag, "startStreaming failed");
             }
         } else {
             ESP_LOGW(kTag, "board_get_camera returned null at 0→1 acquire");
         }
-        PrivacyLeds::getInstance().setCameraState(CameraState::Active);
     }
     xSemaphoreGiveRecursive(m);
 }
 
-CameraPeripheralGuard::~CameraPeripheralGuard()
+CameraStreamGuard::~CameraStreamGuard()
 {
     SemaphoreHandle_t m = lifecycleMutex();
     if (m == nullptr) {
-        PrivacyLeds::getInstance().setCameraState(CameraState::Off);
         return;
     }
 
@@ -80,9 +74,8 @@ CameraPeripheralGuard::~CameraPeripheralGuard()
         if (auto* cam = hal_bridge::board_get_camera()) {
             cam->stopStreaming();
         }
-        PrivacyLeds::getInstance().setCameraState(CameraState::Off);
     }
     xSemaphoreGiveRecursive(m);
 }
 
-}  // namespace stackchan::privacy
+}  // namespace stackchan::camera

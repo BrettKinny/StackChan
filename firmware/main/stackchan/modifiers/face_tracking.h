@@ -63,7 +63,6 @@ private:
     // resumeIdleMotion pair. true → idle modifier emits the reduced
     // overlay action set; false → full idle motion resumes.
     void setIdleTrackingMode(bool tracking);
-    void setTrackingLed(Modifiable& stackchan, bool on);
     // Issues a servo command toward (_smooth_x, _smooth_y) at kLookAtSpeed,
     // but only if the move clears the deadband vs. last commanded target.
     void _maybeIssueLookAt(Modifiable& stackchan);

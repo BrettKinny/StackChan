@@ -7,7 +7,6 @@
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
-#include <stackchan/privacy/privacy_leds.h>
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
@@ -37,14 +36,6 @@ void Hal::init()
     xiaozhi_mcp_init();
     head_touch_init();
     io_expander_init();
-    // Privacy LED boot self-test: cycles indices 6+7 through amber ->
-    // cyan-blue -> red -> off (~2 s) so the family can confirm at power-
-    // on that both privacy indicators + the I2C bus to the PY32 are alive.
-    // MUST run after io_expander_init() — setRgbColor is a no-op until the
-    // expander is up. _stackchan_update_task hasn't started yet (that's in
-    // startXiaozhi() which runs after Hal::init() returns) so the test
-    // can't be clobbered by the tick.
-    stackchan::privacy::PrivacyLeds::getInstance().runBootSelfTest();
     rtc_init();
     imu_init();
     servo_init();
@@ -164,12 +155,6 @@ static void _stackchan_update_task(void* param)
         LvglLockGuard lock;
 
         GetStackChan().update();
-
-        // Re-assert privacy indicator pixels AFTER the ring animations have
-        // run, so they visibly override the chat-state colours at the
-        // reserved indices (right-ring 6 = mic, 7 = camera). See
-        // stackchan/privacy/PRIVACY_LEDS.md for rationale.
-        stackchan::privacy::PrivacyLeds::getInstance().update();
 
         if (!is_xiaozhi_ready) {
             is_xiaozhi_ready = hal_bridge::is_xiaozhi_ready();

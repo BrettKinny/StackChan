@@ -17,7 +17,7 @@
 #include "display.h"
 #include "stackchan_camera.h"
 #include <stackchan/face/camera_arbiter.h>
-#include <stackchan/privacy/camera_peripheral_guard.h>
+#include <stackchan/camera/camera_stream_guard.h>
 #include <stackchan/stackchan.h>
 #include "esp_jpeg_common.h"
 #include "jpg/image_to_jpeg.h"
@@ -327,11 +327,10 @@ StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
         }
     }
 
-    // Privacy LED step 4: do NOT issue VIDIOC_STREAMON here. The
-    // CameraPeripheralGuard (face detector enable, MCP take_photo, etc.)
-    // is now the only path that turns the V4L2 stream on. The camera is
-    // initialised but quiescent until a consumer needs it; the red
-    // privacy LED then becomes a true peripheral indicator.
+    // Do NOT issue VIDIOC_STREAMON here. CameraStreamGuard (face detector
+    // enable, MCP take_photo, etc.) is the only path that brings the V4L2
+    // stream up. The camera is initialised but quiescent until a consumer
+    // needs it.
     ESP_LOGI(TAG, "Camera init success (stream off; awaiting first guard)");
 }
 
@@ -396,13 +395,12 @@ bool StackChanCamera::Capture()
         ~MotionPauseGuard() { m.setModifyLock(false); }
     } motion_pause_guard{ ::GetStackChan().motion() };
 
-    // Layer 1 privacy LED + V4L2 stream lifecycle. The refcounted guard
-    // brings the stream up on the 0→1 transition (synchronous; blocks
-    // ~5 s on first acquire after boot for ISP autoexposure warmup) and
-    // tears it down on 1→0. Composes with the FaceDetector guard so two
-    // simultaneous consumers keep the stream and LED steady across the
-    // overlap.
-    stackchan::privacy::CameraPeripheralGuard camera_privacy_guard;
+    // V4L2 stream lifecycle. The refcounted guard brings the stream up
+    // on the 0→1 transition (synchronous; blocks ~5 s on first acquire
+    // after boot for ISP autoexposure warmup) and tears it down on 1→0.
+    // Composes with the FaceDetector guard so two simultaneous consumers
+    // keep the stream up across the overlap.
+    stackchan::camera::CameraStreamGuard camera_stream_guard;
     if (!streaming_on_) {
         // startStreaming() failed inside the guard ctor (logged there).
         // The guard dtor will still flip the LED back off when this
@@ -863,7 +861,7 @@ bool StackChanCamera::Capture()
 bool StackChanCamera::isStreaming() const
 {
     // V4L2 truth, flipped by startStreaming()/stopStreaming(). The
-    // refcounted CameraPeripheralGuard is the only legitimate caller of
+    // refcounted CameraStreamGuard is the only legitimate caller of
     // those, so this tracks the actual VIDIOC_STREAMON state.
     return streaming_on_;
 }
@@ -947,13 +945,6 @@ bool StackChanCamera::StreamCaptures()
     if (!streaming_on_ || video_fd_ < 0) {
         return false;
     }
-
-    // Privacy LED guard moved up to FaceDetector::processFrame() so it
-    // wraps both the StreamCaptures() capture step (~50 ms) AND the
-    // ESP-DL inference (~280 ms). The previous per-StreamCaptures scope
-    // visibly blinked the red privacy LED at the inference cadence
-    // (capture-on, inference-off, capture-on, ...). Step 4-5 replaces
-    // both with a refcounted CameraPeripheralGuard tied to STREAMON.
 
     {
         struct v4l2_buffer buf = {};
