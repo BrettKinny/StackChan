@@ -591,3 +591,40 @@ index f0cc034..34739af 100644
                  if (strcmp(type->valuestring, "hello") == 0) {
                      ParseServerHello(root);
                  } else {
+diff --git c/main/boards/common/i2c_device.cc w/main/boards/common/i2c_device.cc
+index 835997d..1061416 100644
+--- c/main/boards/common/i2c_device.cc
++++ w/main/boards/common/i2c_device.cc
+@@ -21,15 +21,29 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr) {
+ 
+ void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
+     uint8_t buffer[2] = {reg, value};
+-    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
++    esp_err_t err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "WriteReg failed reg=0x%02X val=0x%02X err=%s",
++                 reg, value, esp_err_to_name(err));
++    }
+ }
+ 
+ uint8_t I2cDevice::ReadReg(uint8_t reg) {
+     uint8_t buffer[1];
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100));
++    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "ReadReg failed reg=0x%02X err=%s",
++                 reg, esp_err_to_name(err));
++        return 0xFF;
++    }
+     return buffer[0];
+ }
+ 
+ void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
++    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "ReadRegs failed reg=0x%02X len=%u err=%s",
++                 reg, (unsigned)length, esp_err_to_name(err));
++        // Buffer left untouched; caller must not assume valid contents.
++    }
+ }
