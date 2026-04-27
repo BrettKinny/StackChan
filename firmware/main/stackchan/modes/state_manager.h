@@ -49,9 +49,10 @@ public:
     static constexpr uint8_t kKidModePipRightLocal   = 2;  // global 8
     static constexpr uint8_t kSmartModePipRightLocal = 3;  // global 9
 
-    // 5 Hz re-assertion. Chat-state writes (set_left_leds in
-    // stackchan_display.cc) repaint the whole left ring including index 0,
-    // so the pip is restored within ~200 ms of any clobber.
+    // 5 Hz tick. Drives the SECURITY 1 Hz flash phase + acts as
+    // defense-in-depth re-assert in case any future writer clobbers the
+    // state arc or toggle pips. Today nothing else paints left 0-5 or
+    // right 8/9 — but cheap insurance has a place.
     static constexpr uint32_t kReassertIntervalMs = 200;
     // 1 Hz flash for SECURITY: 500 ms on, 500 ms off.
     static constexpr uint32_t kSecurityFlashHalfMs = 500;

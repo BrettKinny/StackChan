@@ -403,13 +403,11 @@ void StateManager::_update(Modifiable& stackchan)
         mclog::tagInfo(_tag, "sleep: torque released (pose settled)");
     }
 
-    // 5 Hz unconditional pip re-assert. The chat-state writes in
-    // stackchan_display.cc::set_left_leds() repaint pixel 0 along with the
-    // rest of the left ring on every LISTENING/SPEAKING/STANDBY transition,
-    // so we restore the pip within ~200 ms.
-    //
-    // SECURITY also rides this tick — the flash phase is recomputed on every
-    // pass, so a 200 ms tick produces a clean 1 Hz flash (500 ms on / 500 ms off).
+    // 5 Hz tick. Primary purpose is driving the SECURITY 1 Hz flash —
+    // the flash phase is recomputed on every pass, so a 200 ms tick
+    // produces a clean 500 ms on / 500 ms off. The same tick also re-
+    // asserts the state arc + toggle pips as defense-in-depth in case
+    // any future writer clobbers them.
     if ((now - _last_assert_ms) < kReassertIntervalMs) return;
     writePips(stackchan, now);
     _last_assert_ms = now;
