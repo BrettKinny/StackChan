@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 #include "motion.h"
+#include "esp_log.h"
 #include <cmath>
 
 using namespace uitk;
 using namespace stackchan::motion;
+
+static const char* TAG = "motion";
 
 void Motion::init()
 {
@@ -140,10 +143,23 @@ void Motion::setAutoAngleSyncEnabled(bool enabled)
 
 void Motion::setModifyLock(bool locked)
 {
-    _is_modify_locked = locked;
+    if (locked) {
+        _modify_lock_count.fetch_add(1, std::memory_order_acq_rel);
+    } else {
+        uint8_t prev = _modify_lock_count.load(std::memory_order_acquire);
+        while (prev > 0) {
+            if (_modify_lock_count.compare_exchange_weak(
+                    prev, prev - 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return;
+            }
+        }
+        ESP_LOGW(TAG, "setModifyLock(false) underflow — over-release ignored");
+    }
 }
 
 bool Motion::isModifyLocked()
 {
-    return _is_modify_locked;
+    return _modify_lock_count.load(std::memory_order_acquire) > 0;
 }

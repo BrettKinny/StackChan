@@ -37,6 +37,7 @@ public:
     static constexpr const char* kName = "face_tracking";
 
     FaceTrackingModifier();
+    ~FaceTrackingModifier() override;
     void _update(Modifiable& stackchan) override;
     const char* name() const override { return kName; }
 
@@ -95,6 +96,20 @@ private:
     // _alpha is also a member because the EMA expression in _update reads
     // it inline; setChatProfile keeps both _alpha and _profile.alpha in sync.
     ChatProfile _profile;
+
+    // Capture-pending guard — held across the face_detected → take_photo
+    // round-trip so the head doesn't drift between detection and the
+    // server-driven still capture. Acquired on Idle→Tracking emit, released
+    // on (a) the next observed Capture (lastCaptureTimestampMs ticks),
+    // (b) face_lost, (c) kCaptureGuardTimeoutMs after acquire (defensive
+    // ceiling when take_photo never arrives — bridge container down, etc.),
+    // or (d) modifier teardown via destructor. Refresh-only on overlapping
+    // face_detected (no double-acquire — Motion::setModifyLock is refcounted
+    // but our outer guard still wants single-ownership semantics so we
+    // don't lose the inner Capture's release).
+    bool     _capture_guard_held              = false;
+    uint32_t _capture_guard_acquired_ms       = 0;
+    uint32_t _capture_guard_baseline_capture_ts = 0;
 
     // Phase 0 instrumentation — counters reset every kPhase0WindowMs.
     // See probes/face-tracking-naturalness.md for the bench procedure.

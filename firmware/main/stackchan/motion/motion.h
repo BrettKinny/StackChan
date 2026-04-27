@@ -7,6 +7,7 @@
 #include "servo.h"
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
+#include <atomic>
 #include <memory>
 
 namespace stackchan::motion {
@@ -156,13 +157,20 @@ public:
     void setAutoTorqueReleaseEnabled(bool enabled);
     void setAutoAngleSyncEnabled(bool enabled);
 
+    // Refcounted cooperative lock. Multiple holders can stack — e.g. the
+    // face_tracking CapturePendingGuard holds across a face_detected →
+    // take_photo round-trip while StackChanCamera::Capture()'s inner
+    // MotionPauseGuard holds across the actual still. The IMU shake
+    // reaction is a third potential concurrent holder. Underflow is
+    // clamped at 0 with a warning log so an over-release never wraps
+    // 255 (which would silently leave the head locked forever).
     void setModifyLock(bool locked);
     bool isModifyLocked();
 
 private:
     std::unique_ptr<Servo> _yaw_servo;
     std::unique_ptr<Servo> _pitch_servo;
-    bool _is_modify_locked = false;
+    std::atomic<uint8_t> _modify_lock_count{0};
 
     static constexpr float RAD_TO_DEG = 180.0f / M_PI;
 
