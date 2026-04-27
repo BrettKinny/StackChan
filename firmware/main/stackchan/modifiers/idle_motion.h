@@ -32,6 +32,17 @@ public:
     // small-observation drifts only.
     static constexpr uint32_t kReturnToCenterSteadyMs = 5000;
 
+    // Phase 3 — high-level idle profile. ModeManager (Phase 4) drives this
+    // via setIdleProfile() on mode entry. NORMAL is the default for awake
+    // idle; LOOKING_AROUND / SLEEPY / SURVEILLANCE shape cadence + amplitude
+    // + pitch baseline to match the corresponding mode's feel.
+    enum class IdleProfile {
+        NORMAL,         // gentle pans + small offsets, 8–15 s cadence
+        LOOKING_AROUND, // wider curious pans, 6–12 s cadence
+        SLEEPY,         // rare slow micro-movements, head pitched down
+        SURVEILLANCE,   // wide deliberate scans, 10–20 s cadence
+    };
+
     // Empty-room backoff (servo lifespan): once no face has been locked for
     // kEmptyRoomThresholdMs, the next idle delay is drawn from
     // kEmptyRoomMinMs..kEmptyRoomMaxMs instead of _interval_min.._interval_max.
@@ -43,7 +54,9 @@ public:
     static constexpr uint32_t kEmptyRoomMinMs       = 15000;
     static constexpr uint32_t kEmptyRoomMaxMs       = 30000;
 
-    IdleMotionModifier(uint32_t interval_min = 4000, uint32_t interval_max = 8000)
+    // Defaults match IdleProfile::NORMAL (Phase 3) — slower, gentler than the
+    // pre-Phase-3 4–8 s mix that produced the "jerky periodic moves" complaint.
+    IdleMotionModifier(uint32_t interval_min = 8000, uint32_t interval_max = 15000)
         : _interval_min(interval_min), _interval_max(interval_max)
     {
         uint32_t now = GetHAL().millis();
@@ -100,6 +113,22 @@ public:
         _amplitude_scale = scale;
     }
 
+    // Phase 3 — switch the high-level idle profile. Updates cadence range
+    // (used by _update's next-tick computation) and shapes the action ranges
+    // applied in perform_idle_motion. Idempotent. Does NOT affect the
+    // tracking-overlay path (face_tracking owns that via setIntervalRange /
+    // setAmplitudeScale).
+    void setIdleProfile(IdleProfile profile)
+    {
+        if (_profile == profile) return;
+        _profile        = profile;
+        const auto& p   = paramsFor(_profile);
+        _interval_min   = p.cadence_min_ms;
+        _interval_max   = p.cadence_max_ms;
+    }
+
+    IdleProfile idleProfile() const { return _profile; }
+
     void _update(Modifiable& stackchan) override
     {
         if (!stackchan.hasAvatar()) return;
@@ -142,6 +171,56 @@ public:
     }
 
 private:
+    // Phase 3 — per-profile parameter table. Each profile shapes:
+    //   cadence_*_ms      next-tick window for the idle path
+    //   yaw/pitch_delta_range  ± deltas for action A (small offset)
+    //   gentle_yaw_range  ± yaw target for action B (gentle look)
+    //   pitch_baseline_*  pitch target window for actions B + C
+    //   speed_min/max     servo speed range (100=slow gentle, 300=quick)
+    //
+    // Servo units are raw ticks: 0.3125° per tick. ±100 = ±31°. Yaw range is
+    // -800 to +800; pitch is 0 to 600.
+    struct ProfileParams {
+        uint32_t cadence_min_ms;
+        uint32_t cadence_max_ms;
+        int yaw_delta_range;
+        int pitch_delta_range;
+        int gentle_yaw_range;
+        int pitch_baseline_min;
+        int pitch_baseline_max;
+        int speed_min;
+        int speed_max;
+    };
+
+    static constexpr ProfileParams kProfileNormal = {
+        // 8–15 s cadence, modest deltas, level pitch baseline. Default awake idle.
+        8000, 15000, 100, 50, 200, 100, 350, 80, 180,
+    };
+    static constexpr ProfileParams kProfileLookAround = {
+        // 6–12 s cadence, wider yaw, slightly raised pitch baseline (alert).
+        6000, 12000, 200, 80, 350, 150, 400, 100, 220,
+    };
+    static constexpr ProfileParams kProfileSleepy = {
+        // 30–60 s cadence, tiny deltas, head pitched DOWN (300–450 baseline).
+        // Slow speeds for languid feel. Pair with droopy eyelid in Phase 3+.
+        30000, 60000, 50, 30, 80, 300, 450, 50, 100,
+    };
+    static constexpr ProfileParams kProfileSurveillance = {
+        // 10–20 s cadence, wide deliberate yaw scans, level pitch baseline.
+        // Slightly slower speeds than NORMAL for the "watching" feel.
+        10000, 20000, 250, 60, 500, 100, 350, 90, 180,
+    };
+
+    static constexpr const ProfileParams& paramsFor(IdleProfile p)
+    {
+        switch (p) {
+            case IdleProfile::LOOKING_AROUND: return kProfileLookAround;
+            case IdleProfile::SLEEPY:         return kProfileSleepy;
+            case IdleProfile::SURVEILLANCE:   return kProfileSurveillance;
+            default:                          return kProfileNormal;
+        }
+    }
+
     // Phase 2 — reduced action set for "face locked" mode. Drops the
     // Random look (would snap off the locked face) and Quick glance (too
     // jarring) branches entirely. Keeps Small observation with halved
@@ -184,6 +263,16 @@ private:
         }
     }
 
+    // Phase 3 — profile-driven action set. Three actions only (was four),
+    // tuned per IdleProfile. The dropped pre-Phase-3 "quick glance" branch
+    // (±500° yaw at speed 250–400) was the dominant cause of the violent
+    // post-photo head-snap the user complained about.
+    //
+    // All three actions go through Servo::moveWithSpeed, which uses
+    // critically-damped spring physics (servo.cpp:84) — the trajectory to
+    // the target is already smooth. Smoothness work in Phase 3 is therefore
+    // about target SELECTION (delta size, cadence, pitch baseline) not about
+    // adding a new easing engine.
     void perform_idle_motion(Modifiable& stackchan)
     {
         auto& motion = stackchan.motion();
@@ -191,43 +280,35 @@ private:
             return;
         }
 
-        int action = Random::getInstance().getInt(0, 100);
+        const auto& p = paramsFor(_profile);
+        int action    = Random::getInstance().getInt(0, 100);
 
-        if (action < 50) {
-            // 【动作 1：随意环视】使用归一化坐标 (-1.0 ~ 1.0)
-            float target_x = Random::getInstance().getFloat(-0.4f, 0.4f);   // 左右看
-            float target_y = Random::getInstance().getFloat(-0.95f, 0.2f);  // 上下看
-            int speed      = Random::getInstance().getInt(150, 300);
-
-            // mclog::info("action 1: look at normalized ({}, {}) in speed {}", target_x, target_y, speed);
-            motion.lookAtNormalized(target_x, target_y, speed);
-        } else if (action < 80) {
-            // 【动作 2：微小的观察动作】基于当前位置的小偏移
-            auto current = motion.getCurrentAngles();  // Vector2i(yaw, pitch)
-
-            int diff_yaw   = Random::getInstance().getInt(-150, 150);
-            int diff_pitch = Random::getInstance().getInt(-80, 80);
-
+        if (action < 60) {
+            // Action A: small offset from current — the "fidget" / "subtle
+            // life" tick. Most common because it never leaves the user's
+            // peripheral; reads as breathing rather than reacting.
+            auto current     = motion.getCurrentAngles();
+            int diff_yaw     = Random::getInstance().getInt(-p.yaw_delta_range, p.yaw_delta_range);
+            int diff_pitch   = Random::getInstance().getInt(-p.pitch_delta_range, p.pitch_delta_range);
             int target_yaw   = uitk::clamp(current.x + diff_yaw, -800, 800);
             int target_pitch = uitk::clamp(current.y + diff_pitch, 0, 600);
-            int speed        = Random::getInstance().getInt(100, 250);
-
-            // mclog::info("action 2: small move to ({}, {}) in speed {}", target_yaw, target_pitch, speed);
+            int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
             motion.moveWithSpeed(target_yaw, target_pitch, speed);
-        } else if (action < 90) {
-            // 【动作 3：快速撇一眼】速度快，跨度中等
-            int target_yaw   = Random::getInstance().getInt(-500, 500);
-            int target_pitch = Random::getInstance().getInt(100, 400);
-            int speed        = Random::getInstance().getInt(250, 400);
-
-            // mclog::info("action 3: quick glance to ({}, {}) in speed {}", target_yaw, target_pitch, speed);
+        } else if (action < 85) {
+            // Action B: gentle look — moderate yaw target with profile-bounded
+            // pitch baseline. The pitch baseline is what gives SLEEPY its
+            // droopy feel (high pitch = head down) and SURVEILLANCE its
+            // attentive level head.
+            int target_yaw   = Random::getInstance().getInt(-p.gentle_yaw_range, p.gentle_yaw_range);
+            int target_pitch = Random::getInstance().getInt(p.pitch_baseline_min, p.pitch_baseline_max);
+            int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
             motion.moveWithSpeed(target_yaw, target_pitch, speed);
         } else {
-            // 【动作 4：yaw 回正】
-            int target_pitch = Random::getInstance().getInt(50, 400);
-            int speed        = Random::getInstance().getInt(100, 300);
-
-            // mclog::info("action 4: go home to (0, {}) in speed {}", target_pitch, speed);
+            // Action C: return to centre. Yaw to 0, pitch to baseline. Resets
+            // accumulated drift so Dotty doesn't end up locked in one quadrant
+            // after enough small-offset ticks.
+            int target_pitch = Random::getInstance().getInt(p.pitch_baseline_min, p.pitch_baseline_max);
+            int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
             motion.moveWithSpeed(0, target_pitch, speed);
         }
     }
@@ -254,6 +335,9 @@ private:
     // initialises to GetHAL().millis() so the timer starts counting from
     // power-on; setTrackingMode(false) re-stamps it on each face_lost.
     uint32_t _last_tracking_active_ms = 0;
+    // Phase 3 — current high-level idle profile. Drives perform_idle_motion's
+    // action ranges + cadence. ModeManager (Phase 4) sets via setIdleProfile.
+    IdleProfile _profile = IdleProfile::NORMAL;
 };
 
 }  // namespace stackchan
