@@ -73,12 +73,14 @@ private:
     float _hp_r_prev_y = 0.0f;
 
     static constexpr int64_t kCooldownUs       = 750000;   // 750 ms
-    // Halved 2026-04-27 from 1e9 → 5e8: the HPF added in 57e12cb (300 Hz
-    // cutoff for HVAC rejection) cut clap energy below the original
-    // threshold, so claps stopped firing sound_event entirely. 5e8 is a
-    // first-iteration guess — drop further if claps still don't trigger,
-    // raise if background chatter spams the bus.
-    static constexpr int64_t kEnergyThreshold  = 500000000;
+    // 1.2B chosen to suppress ambient conversation cluster (500M-900M
+    // observed in live data 2026-04-27) while still catching genuine
+    // claps (1B+). Halve cycle: rev'd from 500M after the activity feed
+    // was being drowned by ambient noise. Earlier history: 1e9 → 5e8 with
+    // the HPF added in 57e12cb (claps fell below the original threshold);
+    // now 5e8 → 1.2e9 once the HPF settled and we had ambient-vs-clap
+    // energy data to set a real boundary.
+    static constexpr int64_t kEnergyThreshold  = 1200000000;
     static constexpr double  kBalanceThreshold = 0.15;     // L vs R fraction
     // 1st-order HPF coefficient. ~300 Hz cutoff, -3 dB at 300 Hz, -6 dB/oct
     // rolloff below. Knocks out HVAC / fan rumble (typically <200 Hz dominant)
