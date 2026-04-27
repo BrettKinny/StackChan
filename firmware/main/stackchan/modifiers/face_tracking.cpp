@@ -108,6 +108,15 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
     // motion lock when one of: (a) Capture() ran (its inner MotionPauseGuard
     // tick advances lastCaptureTimestampMs), (b) timeout elapsed.
     // face_lost release is handled inside the GracePeriod expiry branch.
+    //
+    // On release, if a face is currently detected, we re-seed _smooth_x/y
+    // from the live raw position. Otherwise the EMA values that drifted
+    // during the lock window (head frozen, but face_detection_result kept
+    // updating) become the next servo target — which produces a fast snap
+    // toward the EMA-blended position the moment commands resume. The
+    // re-seed makes the post-freeze command target the actual current
+    // face position with no drift accumulated, eliminating the visible
+    // "spin after photo" catch-up.
     if (_capture_guard_held) {
         uint32_t held_ms = now - _capture_guard_acquired_ms;
         auto* cam = hal_bridge::board_get_camera();
@@ -115,11 +124,19 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
         if (cur_capture_ts != 0 && cur_capture_ts != _capture_guard_baseline_capture_ts) {
             stackchan.motion().setModifyLock(false);
             _capture_guard_held = false;
+            if (detected) {
+                _smooth_x = raw_x;
+                _smooth_y = raw_y;
+            }
             ESP_LOGI(TAG, "capture-pending guard released (capture observed dt=%u ms)",
                      (unsigned)held_ms);
         } else if (held_ms > kCaptureGuardTimeoutMs) {
             stackchan.motion().setModifyLock(false);
             _capture_guard_held = false;
+            if (detected) {
+                _smooth_x = raw_x;
+                _smooth_y = raw_y;
+            }
             ESP_LOGW(TAG, "capture-pending guard timeout-release (%u ms — take_photo never arrived)",
                      (unsigned)held_ms);
         }
