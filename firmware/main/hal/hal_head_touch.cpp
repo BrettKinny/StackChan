@@ -17,10 +17,11 @@ enum class TouchState { IDLE, TOUCHED, SWIPING };
 
 // 配置参数
 struct TouchConfig {
-    // Require at least SI12T_OUTPUT_MID — level 1 (LOW) sat at the noise floor
-    // and produced ~1.3 spurious head_pet events/min when no one was touching
-    // the robot.
-    uint8_t touch_threshold = 2;
+    // Require SI12T_OUTPUT_HIGH — threshold=2 (MID) still let through events
+    // where channel 2 + a neighbour both spiked to MID for ≥150 ms with no one
+    // touching the device. HP-PROBE traces (2026-04-28) caught two such fires
+    // at i=[1,2,2] and i=[0,2,1]. Bumping to 3 demands the firmest reading.
+    uint8_t touch_threshold = 3;
     int16_t swipe_threshold = 40;  // 使用百分比，范围-100到100
     // Consecutive 50 ms samples of `is_touched()` required before we accept
     // the IDLE→TOUCHED transition. Filters sub-150 ms capacitive blips
