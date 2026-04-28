@@ -335,16 +335,18 @@ void StackChanAvatarDisplay::LvglUnlock()
     Unlock();
 }
 
-// Listening indicator at right-ring index 6 (top of right ring). Lit
-// red while xiaozhi's chat sub-state is LISTENING (mic open, ASR active,
-// user's turn to speak); off otherwise. Thinking and speaking are
-// conveyed by face animations only — the LED is a turn-taking signal.
+// Listening indicator at right-ring index 11 (bottom of right ring).
+// Lit red while xiaozhi's chat sub-state is LISTENING (mic open, ASR
+// active, user's turn to speak); off otherwise. Thinking and speaking
+// are conveyed by face animations only — the LED is a turn-taking
+// signal. Bottom of the right ring keeps it spatially separated from
+// the toggle pips at indices 8 / 9.
 static void set_listening_pixel(bool on)
 {
     if (on) {
-        GetHAL().setRgbColor(6, 120, 0, 0);
+        GetHAL().setRgbColor(11, 120, 0, 0);
     } else {
-        GetHAL().setRgbColor(6, 0, 0, 0);
+        GetHAL().setRgbColor(11, 0, 0, 0);
     }
     GetHAL().refreshRgb();
 }
