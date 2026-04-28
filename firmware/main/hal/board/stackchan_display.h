@@ -24,6 +24,11 @@ private:
     bool is_sleeping_                   = false;
     bool thinking_led_pending_          = false;
     bool in_listening_status_           = false;
+    // One-shot: re-emit StateManager's current state to the bridge on the
+    // first xiaozhi STANDBY after boot. The bridge caches state across
+    // reboots; without this resync the dashboard shows whatever the
+    // previous session was in until a real transition happens.
+    bool initial_state_announced_       = false;
     esp_timer_handle_t bubble_clear_timer_            = nullptr;
     esp_timer_handle_t thinking_timer_                = nullptr;
 

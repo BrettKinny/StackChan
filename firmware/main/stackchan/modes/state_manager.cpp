@@ -45,46 +45,55 @@ bool StateManager::parseState(const char* s, State& out)
 
 void StateManager::setState(State next)
 {
-    if (next == _state) return;
-    State prev        = _state;
-    _state            = next;
-    _state_change_ms  = GetHAL().millis();
-    _last_assert_ms   = 0;  // forces a pip repaint on the next _update tick
-    mclog::tagInfo(_tag, "state {} -> {}", stateName(prev), stateName(next));
-    // Exit hook for the OUTGOING state runs FIRST, before we touch the new
-    // state's profile or entry hook. Security needs to tear down its pan task
-    // and release the motion lock before any successor state takes over.
-    if (prev == State::SECURITY) {
-        onExitSecurity();
+    if (next != _state) {
+        State prev        = _state;
+        _state            = next;
+        _state_change_ms  = GetHAL().millis();
+        _last_assert_ms   = 0;  // forces a pip repaint on the next _update tick
+        mclog::tagInfo(_tag, "state {} -> {}", stateName(prev), stateName(next));
+        // Exit hook for the OUTGOING state runs FIRST, before we touch the
+        // new state's profile or entry hook. Security needs to tear down its
+        // pan task and release the motion lock before any successor state
+        // takes over.
+        if (prev == State::SECURITY) {
+            onExitSecurity();
+        }
+        applyIdleProfile();
+        // Phase 5 — sleep entry/exit edge hooks. Run AFTER applyIdleProfile
+        // so the SLEEPY profile is already in place when we lock idle_motion
+        // out, and BEFORE emitStateChanged so the bridge sees the event
+        // after the firmware is fully in its new pose.
+        if (next == State::SLEEP) {
+            onEnterSleep();
+        } else if (prev == State::SLEEP) {
+            onExitSleep();
+        }
+        // Security entry hook also runs after applyIdleProfile so the
+        // SURVEILLANCE profile is in place (the underlying default) before
+        // we take the lock; idle_motion stays locked out for the whole
+        // tenure.
+        if (next == State::SECURITY) {
+            onEnterSecurity();
+        }
+        // Dance edge events — give the bridge an explicit dance_active
+        // flag (separate from generic state_changed) so it can suppress
+        // autonomous photos / TTS for the duration of a dance without
+        // parsing state names.
+        if (next == State::DANCE) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"from\":\"%s\"}", stateName(prev));
+            Application::GetInstance().SendEvent("dance_started", buf);
+        } else if (prev == State::DANCE) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"to\":\"%s\"}", stateName(next));
+            Application::GetInstance().SendEvent("dance_ended", buf);
+        }
     }
-    applyIdleProfile();
-    // Phase 5 — sleep entry/exit edge hooks. Run AFTER applyIdleProfile so the
-    // SLEEPY profile is already in place when we lock idle_motion out, and
-    // BEFORE emitStateChanged so the bridge sees the event after the firmware
-    // is fully in its new pose.
-    if (next == State::SLEEP) {
-        onEnterSleep();
-    } else if (prev == State::SLEEP) {
-        onExitSleep();
-    }
-    // Security entry hook also runs after applyIdleProfile so the
-    // SURVEILLANCE profile is in place (the underlying default) before we
-    // take the lock; idle_motion stays locked out for the whole tenure.
-    if (next == State::SECURITY) {
-        onEnterSecurity();
-    }
-    // Dance edge events — give the bridge an explicit dance_active flag
-    // (separate from generic state_changed) so it can suppress autonomous
-    // photos / TTS for the duration of a dance without parsing state names.
-    if (next == State::DANCE) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"from\":\"%s\"}", stateName(prev));
-        Application::GetInstance().SendEvent("dance_started", buf);
-    } else if (prev == State::DANCE) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"to\":\"%s\"}", stateName(next));
-        Application::GetInstance().SendEvent("dance_ended", buf);
-    }
+    // Always emit state_changed — even when next == _state — so callers
+    // can use `setState(currentState())` as a deliberate re-sync. The
+    // bridge caches state across firmware reboots, and there's no other
+    // way for it to learn the firmware is back in IDLE if the firmware
+    // happens to already be in IDLE when the dashboard click arrives.
     emitStateChanged();
 }
 

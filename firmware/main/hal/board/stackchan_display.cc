@@ -644,6 +644,13 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         if (auto* sm = static_cast<stackchan::StateManager*>(
                 stackchan.getModifierByName(stackchan::StateManager::kName))) {
             sm->onVoiceStandby();
+            // First-STANDBY-after-boot resync: re-emit the current state so
+            // the bridge's cached state (held across firmware reboots) is
+            // refreshed without requiring a real transition.
+            if (!initial_state_announced_) {
+                sm->setState(sm->currentState());
+                initial_state_announced_ = true;
+            }
         }
 
         esp_timer_stop(bubble_clear_timer_);
