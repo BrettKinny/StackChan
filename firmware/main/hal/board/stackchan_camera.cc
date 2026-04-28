@@ -19,6 +19,32 @@
 #include <stackchan/face/camera_arbiter.h>
 #include <stackchan/camera/camera_stream_guard.h>
 #include <stackchan/stackchan.h>
+
+// V4L2 ioctl macro encoding fix. lwip's sockets.h (pulled in transitively by
+// stackchan.h -> ... -> lwip/sockets.h) redefines _IO / _IOR / _IOW with the
+// BSD encoding (IOC_OUT | IOCPARM_MASK | ...), overriding esp_video's
+// linux/ioctl.h Linux encoding. linux/ioctl.h uses #pragma once, so simply
+// reordering the videodev2.h include doesn't restore the Linux versions.
+//
+// The esp_video dispatcher (esp_video_ioctl.c, separate TU, no lwip pull-in)
+// keeps its case-constants Linux-encoded, so a BSD-expanded VIDIOC_QUERYCAP
+// here would never match -> dispatcher returns ESP_ERR_INVALID_ARG -> errno=22
+// EINVAL on every camera ioctl. Symptom: "VIDIOC_QUERYCAP failed errno=22"
+// at boot, "CameraStreamGuard: startStreaming failed", FaceDetector spinning
+// on "StreamCaptures failed", phase0 fps=0.
+//
+// Force the Linux encoding back into scope. The underlying _IOC machinery
+// (_IOC, _IOC_NONE, _IOC_READ, _IOC_WRITE, _IOC_TYPECHECK) is not redefined
+// by lwip and is still Linux-flavoured here.
+#undef _IO
+#undef _IOR
+#undef _IOW
+#undef _IOWR
+#define _IO(type,nr)        _IOC(_IOC_NONE,(type),(nr),0)
+#define _IOR(type,nr,size)  _IOC(_IOC_READ,(type),(nr),(_IOC_TYPECHECK(size)))
+#define _IOW(type,nr,size)  _IOC(_IOC_WRITE,(type),(nr),(_IOC_TYPECHECK(size)))
+#define _IOWR(type,nr,size) _IOC(_IOC_READ|_IOC_WRITE,(type),(nr),(_IOC_TYPECHECK(size)))
+
 #include "esp_jpeg_common.h"
 #include "jpg/image_to_jpeg.h"
 #include "jpg/jpeg_to_image.h"
