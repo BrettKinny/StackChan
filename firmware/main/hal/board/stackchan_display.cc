@@ -321,6 +321,20 @@ void StackChanAvatarDisplay::SetupUI()
     FaceDetector::getInstance().start();
 
     ESP_LOGI(TAG, "Avatar created and started");
+
+    // B6 investigation (2026-04-28): boot-audit the modifier pool. Probes
+    // each kName-addressable modifier we expect to be alive. Modifiers with
+    // a non-null lookup are present; null lookups mean either not registered
+    // or registered without a kName override. FaceTrackingModifier and
+    // IdleMotionModifier are lazy-created on first SetStatus, so they
+    // legitimately read null here — that absence is what we want logged.
+    {
+        auto& sc = stackchan;
+        ESP_LOGI(TAG, "boot_audit: state_manager=%p face_tracking=%p idle_motion=%p",
+                 sc.getModifierByName(stackchan::StateManager::kName),
+                 sc.getModifierByName(FaceTrackingModifier::kName),
+                 sc.getModifierByName(IdleMotionModifier::kName));
+    }
 }
 
 void StackChanAvatarDisplay::LvglLock()
@@ -589,13 +603,25 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // Sleep entry still removes both modifiers — see the sleep handler at
     // ~line 374. That remains the only chat-related lifecycle removal point.
     if (!is_sleeping_) {
+        bool created_ft = false;
+        bool created_im = false;
         if (face_tracking_modifier_id_ < 0) {
             face_tracking_modifier_id_ = stackchan.addModifier(
                 std::make_unique<FaceTrackingModifier>());
+            created_ft = true;
         }
         if (idle_motion_modifier_id_ < 0) {
             idle_motion_modifier_id_ = stackchan.addModifier(
                 std::make_unique<IdleMotionModifier>());
+            created_im = true;
+        }
+        // B6 investigation (2026-04-28): log the lazy-create edge so we can
+        // confirm from serial that face_tracking entered the modifier pool
+        // when SetStatus first ran. Only logs the transition, not every call.
+        if (created_ft || created_im) {
+            ESP_LOGI(TAG, "lazy_create: status=%s ft_id=%d im_id=%d (created ft=%d im=%d)",
+                     status, face_tracking_modifier_id_, idle_motion_modifier_id_,
+                     (int)created_ft, (int)created_im);
         }
     }
 

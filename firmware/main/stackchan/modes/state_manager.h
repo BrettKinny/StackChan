@@ -142,6 +142,13 @@ private:
     static void securityPanTaskEntry(void* arg);
     void runSecurityPanLoop();
 
+    // Dance mode — instantiate a DanceModifier on entry so the keyframe
+    // sequence drives the head and the left ring's animation. The modifier
+    // self-destroys when the timeline finishes; onExitDance() forces removal
+    // if the user transitions out of DANCE before the choreography ends.
+    void onEnterDance();
+    void onExitDance();
+
     // Face-state pixel (global 6) tri-state. Detected wins on face_detected;
     // Identified wins on the MCP tool call but only while a face is in frame
     // and only for kFaceIdentifiedTimeoutMs after each refresh.
@@ -168,6 +175,12 @@ private:
     TaskHandle_t      _security_task_handle = nullptr;
     std::atomic<bool> _security_running{false};
     SemaphoreHandle_t _security_stop_sem    = nullptr;
+
+    // Pool id of the active DanceModifier, or -1 if no dance is in flight.
+    // The modifier self-destroys when its timeline finishes; the id then
+    // points at a free pool slot, which removeModifier handles as a benign
+    // no-op. A fresh entry to DANCE overwrites it with a new id.
+    int _dance_modifier_id = -1;
 };
 
 }  // namespace stackchan

@@ -6,6 +6,7 @@
 #include "state_manager.h"
 #include "../stackchan.h"
 #include "../modifiers/idle_motion.h"
+#include "../modifiers/dance.h"
 #include "../avatar/avatar/elements/emotion.h"
 #include "application.h"
 #include <hal/hal.h>
@@ -54,9 +55,14 @@ void StateManager::setState(State next)
         // Exit hook for the OUTGOING state runs FIRST, before we touch the
         // new state's profile or entry hook. Security needs to tear down its
         // pan task and release the motion lock before any successor state
-        // takes over.
+        // takes over. Dance tears down its choreography modifier here too so
+        // the next state's left-ring writes don't fight a still-running
+        // keyframe timeline.
         if (prev == State::SECURITY) {
             onExitSecurity();
+        }
+        if (prev == State::DANCE) {
+            onExitDance();
         }
         applyIdleProfile();
         // Phase 5 — sleep entry/exit edge hooks. Run AFTER applyIdleProfile
@@ -78,8 +84,11 @@ void StateManager::setState(State next)
         // Dance edge events — give the bridge an explicit dance_active
         // flag (separate from generic state_changed) so it can suppress
         // autonomous photos / TTS for the duration of a dance without
-        // parsing state names.
+        // parsing state names. Entry hook runs alongside so the choreography
+        // timeline is in the modifier pool by the time the bridge sees
+        // dance_started.
         if (next == State::DANCE) {
+            onEnterDance();
             char buf[64];
             std::snprintf(buf, sizeof(buf), "{\"from\":\"%s\"}", stateName(prev));
             Application::GetInstance().SendEvent("dance_started", buf);
@@ -331,6 +340,30 @@ void StateManager::onExitSecurity()
         sc.avatar().setEmotion(avatar::Emotion::Neutral);
     }
     mclog::tagInfo(_tag, "security: pan task stopped, lock released, head to home");
+}
+
+void StateManager::onEnterDance()
+{
+    // Pick the Happy sequence as the default — short (~4 s), clearly
+    // dance-y (sway + happy eyes + open mouth). The other sequences in
+    // dance.h (Robot, Panic, LookAround) are reserved for voice-driven or
+    // bridge-driven choreography that wants a specific feel.
+    auto modifier = std::make_unique<DanceModifier>(DanceModifier::Happy);
+    _dance_modifier_id = ::GetStackChan().addModifier(std::move(modifier));
+    mclog::tagInfo(_tag, "dance: choreography started (modifier id={})",
+                   _dance_modifier_id);
+}
+
+void StateManager::onExitDance()
+{
+    // Tear down the timeline if it's still running. removeModifier is a
+    // benign no-op if the slot has already been freed by the modifier's own
+    // requestDestroy() (timeline finished naturally), so we always call it.
+    if (_dance_modifier_id >= 0) {
+        ::GetStackChan().removeModifier(_dance_modifier_id);
+        _dance_modifier_id = -1;
+    }
+    mclog::tagInfo(_tag, "dance: choreography stopped");
 }
 
 void StateManager::securityPanTaskEntry(void* arg)
