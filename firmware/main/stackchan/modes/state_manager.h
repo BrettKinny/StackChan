@@ -78,6 +78,15 @@ public:
     void onFaceDetected();
     void onFaceLost();
 
+    // xiaozhi chat-state hooks. Called from stackchan_display.cc when
+    // xiaozhi enters LISTENING (user has the turn) or STANDBY (no chat
+    // in flight). Functionally parallel to face_detected/face_lost: voice
+    // activity is the second presence signal that drives idle ↔ talk,
+    // so the talk arc still lights even when face detection is unavailable.
+    // Sticky states (STORY_TIME/SECURITY/DANCE) ignore voice edges.
+    void onVoiceListening();
+    void onVoiceStandby();
+
     // Phase 5 — capacitive head-pet wake. Called from head_pet.cpp when a
     // press fires. No-op outside SLEEP; in SLEEP transitions to IDLE
     // (head-pet is non-conversational, so we don't auto-engage TALK).

@@ -603,6 +603,15 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         thinking_led_pending_ = false;
         set_listening_pixel(true);
 
+        // Voice activity is the second presence signal that drives idle ↔
+        // talk. Without this, the talk arc only lights when face_detected
+        // fires, which is unavailable when the camera streamoff/face
+        // detector pipeline is broken.
+        if (auto* sm = static_cast<stackchan::StateManager*>(
+                stackchan.getModifierByName(stackchan::StateManager::kName))) {
+            sm->onVoiceListening();
+        }
+
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);
 
@@ -628,6 +637,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
 
         set_listening_pixel(false);
+
+        // No chat in flight — drop voice-driven TALK back to IDLE. Mirrors
+        // the face_lost path. Sticky states (story/sleep/security/dance)
+        // own their own exits.
+        if (auto* sm = static_cast<stackchan::StateManager*>(
+                stackchan.getModifierByName(stackchan::StateManager::kName))) {
+            sm->onVoiceStandby();
+        }
 
         esp_timer_stop(bubble_clear_timer_);
         esp_timer_start_once(bubble_clear_timer_, 2500 * 1000);

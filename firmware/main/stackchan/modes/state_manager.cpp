@@ -131,6 +131,29 @@ void StateManager::onFaceLost()
     }
 }
 
+void StateManager::onVoiceListening()
+{
+    // xiaozhi entered LISTENING — user is taking a conversational turn.
+    // Same edge as face_detected for the mutex transition: IDLE/SLEEP -> TALK.
+    // Sticky states (STORY_TIME/SECURITY/DANCE) own their own exits.
+    //
+    // This is the parallel-presence signal: face presence drives the same
+    // transition, but voice presence is enough on its own when face
+    // detection is unavailable (camera streamoff, lens covered, etc.).
+    if (_state == State::IDLE || _state == State::SLEEP) {
+        setState(State::TALK);
+    }
+}
+
+void StateManager::onVoiceStandby()
+{
+    // xiaozhi returned to STANDBY — no chat in flight. Drop back to IDLE
+    // if we entered TALK from a voice trigger. Mirrors onFaceLost.
+    if (_state == State::TALK) {
+        setState(State::IDLE);
+    }
+}
+
 void StateManager::onHeadPet()
 {
     // Phase 5 — capacitive head-pet wakes from SLEEP. No-op outside SLEEP.
