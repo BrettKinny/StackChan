@@ -341,14 +341,30 @@ void StackChanAvatarDisplay::LvglUnlock()
 // are conveyed by face animations only — the LED is a turn-taking
 // signal. Bottom of the right ring keeps it spatially separated from
 // the toggle pips at indices 8 / 9.
+//
+// Routes through StateManager so the right ring is owned by a single
+// writer and re-asserted on the 5 Hz tick (defense against MCP / dance
+// clobbers). Also emits a "chat_status" perception event so the bridge
+// can mirror listening state on the dashboard.
 static void set_listening_pixel(bool on)
 {
-    if (on) {
-        GetHAL().setRgbColor(11, 120, 0, 0);
-    } else {
-        GetHAL().setRgbColor(11, 0, 0, 0);
+    auto& stackchan = ::GetStackChan();
+    if (auto* sm = static_cast<stackchan::StateManager*>(
+            stackchan.getModifierByName(stackchan::StateManager::kName))) {
+        sm->setListening(on);
     }
-    GetHAL().refreshRgb();
+    // Edge-only emission so the bridge sees one event per LISTENING <-> not
+    // transition; SetStatus("STANDBY") and SetStatus("SPEAKING") both call
+    // here with on=false in succession otherwise.
+    static bool last_emitted = false;
+    static bool initialised  = false;
+    if (!initialised || on != last_emitted) {
+        Application::GetInstance().SendEvent(
+            "chat_status",
+            on ? "{\"listening\":true}" : "{\"listening\":false}");
+        last_emitted = on;
+        initialised  = true;
+    }
 }
 
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)

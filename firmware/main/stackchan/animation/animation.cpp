@@ -30,7 +30,11 @@ void Keyframe::apply()
     apply_servo(pitchServo, motion.pitchServo());
 
     stackchan.leftNeonLight().setColor(leftRgbColor);
-    stackchan.rightNeonLight().setColor(rightRgbColor);
+    // Right ring is owned by StateManager (status indicators: face, kid_mode,
+    // smart_mode, listening). Dance choreography only animates the left ring;
+    // any rightRgbColor on a Keyframe is preserved in the struct for future
+    // use but not applied to the hardware. StateManager re-asserts the entire
+    // right ring at 5 Hz as defense-in-depth in case this guarantee weakens.
 }
 
 void Timeline::start()

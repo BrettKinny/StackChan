@@ -115,6 +115,15 @@ void StateManager::setSmartMode(bool enabled)
 
 void StateManager::onFaceDetected()
 {
+    // Right-ring face pixel (global 6). Promote Off -> Detected, but never
+    // downgrade Identified -> Detected — Identified holds for its timeout
+    // window even if face_tracking re-fires the detection edge.
+    _face_detected = true;
+    if (_face_state == FaceState::Off) {
+        _face_state = FaceState::Detected;
+    }
+    _last_assert_ms = 0;
+
     // IDLE -> TALK on face_detected. Sticky states (STORY_TIME, SECURITY,
     // DANCE) own their own exits — a face appearing mid-story shouldn't
     // bump us out of story_time, and a face appearing during security mode is
@@ -132,12 +141,42 @@ void StateManager::onFaceDetected()
 
 void StateManager::onFaceLost()
 {
+    // Right-ring face pixel: face is gone — extinguish regardless of whether
+    // we were Detected or Identified.
+    _face_detected = false;
+    _face_state = FaceState::Off;
+    _last_assert_ms = 0;
+
     // Only TALK -> IDLE on face_lost. The grace-period check has already
     // happened in face_tracking before this call site, so by the time we land
     // here the face is genuinely gone.
     if (_state == State::TALK) {
         setState(State::IDLE);
     }
+}
+
+void StateManager::setFaceIdentified()
+{
+    // No-op if no face is in frame — lighting green for an empty room would
+    // be misleading. Bridge calls this only on successful VLM roster match,
+    // which implies a face was just captured, but the camera lifecycle
+    // can race: by the time the call lands, face_tracking may already have
+    // fired face_lost. Defensive guard.
+    if (!_face_detected) {
+        mclog::tagInfo(_tag, "set_face_identified ignored: no face currently detected");
+        return;
+    }
+    _face_state = FaceState::Identified;
+    _face_state_set_ms = GetHAL().millis();
+    _last_assert_ms = 0;
+    mclog::tagInfo(_tag, "face identified — green pip lit for {} ms", kFaceIdentifiedTimeoutMs);
+}
+
+void StateManager::setListening(bool on)
+{
+    if (_listening == on) return;
+    _listening = on;
+    _last_assert_ms = 0;
 }
 
 void StateManager::onVoiceListening()
@@ -406,7 +445,40 @@ void StateManager::writePips(Modifiable& stackchan, uint32_t now)
         }
     }
 
-    // ---- Toggle pips on right ring (global 8 = local 2, global 9 = local 3) ----
+    // ---- Right ring (global 6-11) — all six pixels owned and re-asserted here ----
+    //
+    // The right ring is the status-indicator strip. Every pixel is written
+    // every tick so MCP writes (set_led_color/set_led_multi), dance keyframes,
+    // or any other future writer can't permanently clobber the indicators —
+    // the worst they can do is a 200 ms flicker before the next re-assert.
+
+    // Pixel 6: face state — yellow=detected, green=identified.
+    // Identified has a self-timeout; the bridge refreshes by calling the
+    // self.robot.set_face_identified MCP tool again on each VLM match.
+    if (_face_state == FaceState::Identified
+        && (now - _face_state_set_ms) > kFaceIdentifiedTimeoutMs) {
+        _face_state = _face_detected ? FaceState::Detected : FaceState::Off;
+    }
+    switch (_face_state) {
+        case FaceState::Off:
+            stackchan.rightNeonLight().setColorAt(kFacePipRightLocal, 0, 0, 0);
+            break;
+        case FaceState::Detected:
+            // Tuned yellow — sits in the (0-168) band the existing pips use so
+            // brightness reads consistent across the ring after RGB565 rounding.
+            stackchan.rightNeonLight().setColorAt(kFacePipRightLocal, 168, 140, 0);
+            break;
+        case FaceState::Identified:
+            // Tuned green — ditto.
+            stackchan.rightNeonLight().setColorAt(kFacePipRightLocal, 0, 140, 30);
+            break;
+    }
+
+    // Pixel 7: reserved, locked off (defense-in-depth — if anything else writes
+    // here we over-write within 200 ms).
+    stackchan.rightNeonLight().setColorAt(kReservedPipRightLocal_7, 0, 0, 0);
+
+    // Pixel 8: kid_mode pip.
     if (_kid_mode) {
         // Warm pink — RGB565 quantises hard, so this hue (slightly red-shifted)
         // is what reads as "soft pink" once the PY32 IO expander rounds it.
@@ -414,10 +486,24 @@ void StateManager::writePips(Modifiable& stackchan, uint32_t now)
     } else {
         stackchan.rightNeonLight().setColorAt(kKidModePipRightLocal, 0, 0, 0);
     }
+
+    // Pixel 9: smart_mode pip.
     if (_smart_mode) {
         stackchan.rightNeonLight().setColorAt(kSmartModePipRightLocal, 168, 80, 0);
     } else {
         stackchan.rightNeonLight().setColorAt(kSmartModePipRightLocal, 0, 0, 0);
+    }
+
+    // Pixel 10: reserved, locked off.
+    stackchan.rightNeonLight().setColorAt(kReservedPipRightLocal_10, 0, 0, 0);
+
+    // Pixel 11: listening pixel — red while xiaozhi is in LISTENING (mic open,
+    // user's turn). Off otherwise. setListening() is called from
+    // stackchan_display.cc SetStatus() at LISTENING / STANDBY / SPEAKING edges.
+    if (_listening) {
+        stackchan.rightNeonLight().setColorAt(kListeningPipRightLocal, 120, 0, 0);
+    } else {
+        stackchan.rightNeonLight().setColorAt(kListeningPipRightLocal, 0, 0, 0);
     }
 }
 

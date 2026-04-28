@@ -74,8 +74,10 @@ void Hal::xiaozhi_mcp_init()
     mclog::tagInfo(_tag, "add robot.set_led_color tool");
     mcp_server.AddTool(
         "self.robot.set_led_color",
-        "Set the color of the robot's INTERNAL onboard LED. This is NOT for room lights. "
-        "Values: 0-168 (safe range). Red=168,0,0; Green=0,168,0; Blue=0,0,168; White=100,100,100; Off=0,0,0.",
+        "Set the colour of the LEFT half of the LED ring (state-arc, 6 pixels). "
+        "The RIGHT half is reserved for owned status indicators (face, kid_mode, "
+        "smart_mode, listening) and is not writable from this tool. Useful for "
+        "chat-driven LED play. Values 0-168 per channel.",
         PropertyList({Property("red", kPropertyTypeInteger, 0, 0, 168),
                       Property("green", kPropertyTypeInteger, 0, 0, 168),
                       Property("blue", kPropertyTypeInteger, 0, 0, 168)}),
@@ -84,12 +86,12 @@ void Hal::xiaozhi_mcp_init()
             int g = properties["green"].value<int>();
             int b = properties["blue"].value<int>();
 
-            mclog::tagInfo(_tag, "set_led_color: r={}, g={}, b={}", r, g, b);
+            mclog::tagInfo(_tag, "set_led_color (left ring only): r={}, g={}, b={}", r, g, b);
 
             LvglLockGuard lock;
 
             GetStackChan().leftNeonLight().setColor(r, g, b);
-            GetStackChan().rightNeonLight().setColor(r, g, b);
+            // Right ring is owned by StateManager — do not write here.
 
             return true;
         });
@@ -97,10 +99,12 @@ void Hal::xiaozhi_mcp_init()
     mclog::tagInfo(_tag, "add robot.set_led_multi tool");
     mcp_server.AddTool(
         "self.robot.set_led_multi",
-        "Set ONE pixel of the robot's 12-LED ring directly. Index 0-5 = left ring, 6-11 = right ring. "
-        "Bypasses the ring colour animation, so the chosen pixel holds its colour while the rest of the "
-        "ring keeps animating (used for hybrid status indicators, e.g. smart-mode). r/g/b 0-255.",
-        PropertyList({Property("index", kPropertyTypeInteger, 0, 0, 11),
+        "Set ONE pixel of the LEFT state-arc ring directly. Index 0-5 = left ring. "
+        "Right-ring indices 6-11 are reserved for owned status indicators "
+        "(face, kid_mode, smart_mode, listening) and cannot be written through "
+        "this tool. Bypasses the ring colour animation, so the chosen pixel holds "
+        "its colour while the rest of the ring keeps animating. r/g/b 0-255.",
+        PropertyList({Property("index", kPropertyTypeInteger, 0, 0, 5),
                       Property("red", kPropertyTypeInteger, 0, 0, 255),
                       Property("green", kPropertyTypeInteger, 0, 0, 255),
                       Property("blue", kPropertyTypeInteger, 0, 0, 255)}),
@@ -110,8 +114,8 @@ void Hal::xiaozhi_mcp_init()
             int g     = properties["green"].value<int>();
             int b     = properties["blue"].value<int>();
 
-            if (index < 0 || index > 11) {
-                mclog::tagWarn(_tag, "set_led_multi: index out of range: {}", index);
+            if (index < 0 || index > 5) {
+                mclog::tagWarn(_tag, "set_led_multi: index {} not on left ring (0-5); ignoring", index);
                 return false;
             }
 
@@ -119,11 +123,7 @@ void Hal::xiaozhi_mcp_init()
 
             LvglLockGuard lock;
 
-            if (index < 6) {
-                GetStackChan().leftNeonLight().setColorAt(static_cast<uint8_t>(index), r, g, b);
-            } else {
-                GetStackChan().rightNeonLight().setColorAt(static_cast<uint8_t>(index - 6), r, g, b);
-            }
+            GetStackChan().leftNeonLight().setColorAt(static_cast<uint8_t>(index), r, g, b);
 
             return true;
         });
@@ -181,6 +181,28 @@ void Hal::xiaozhi_mcp_init()
                 mclog::tagWarn(_tag, "set_toggle: unknown name {}", name);
                 return false;
             }
+            return true;
+        });
+
+    mclog::tagInfo(_tag, "add robot.set_face_identified tool");
+    mcp_server.AddTool(
+        "self.robot.set_face_identified",
+        "Signal that the currently-detected face has been identified by the "
+        "server-side VLM/roster pipeline. Lights the right-ring face pixel "
+        "(global 6) green for ~4 seconds; refresh by calling again. No-op "
+        "if no face is currently detected. The bridge calls this after a "
+        "successful room-view identification.",
+        std::vector<Property>{},
+        [this](const PropertyList& properties) -> ReturnValue {
+            auto* sm = static_cast<stackchan::StateManager*>(
+                GetStackChan().getModifierByName(stackchan::StateManager::kName));
+            if (!sm) {
+                mclog::tagWarn(_tag, "set_face_identified: StateManager not found in modifier pool");
+                return false;
+            }
+            mclog::tagInfo(_tag, "set_face_identified");
+            LvglLockGuard lock;
+            sm->setFaceIdentified();
             return true;
         });
 

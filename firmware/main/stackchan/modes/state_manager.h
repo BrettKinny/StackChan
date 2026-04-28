@@ -25,19 +25,26 @@ enum class State {
     DANCE,       // transient performance
 };
 
-// StateManager owns the high-level mode for the device:
+// StateManager owns the high-level mode for the device AND the entire right
+// LED ring (status indicators):
 //   - State arc on left ring 0-5      (all 6 pixels paint the state colour).
-//   - Toggle pips on right ring 8 / 9 (kid_mode warm pink, smart_mode orange).
+//   - Face state pixel  on right ring 6  (yellow=detected, green=identified).
+//   - Reserved pixels   on right ring 7 / 10 (locked off, defense-in-depth).
+//   - Toggle pips       on right ring 8 / 9  (kid_mode warm pink, smart_mode orange).
+//   - Listening pixel   on right ring 11     (red while xiaozhi LISTENING).
 //   - IdleMotionModifier::IdleProfile (NORMAL / SURVEILLANCE / SLEEPY).
 //   - "state_changed" perception event for bridge consumers.
 //
-// The 5 Hz tick drives the SECURITY 1 Hz flash and acts as defense-in-depth
-// re-assert. Chat-state writes (set_left_leds in stackchan_display.cc) no
-// longer touch the left ring — that hook now drives only the right-ring
-// listening pixel at index 6.
+// The 5 Hz tick drives the SECURITY 1 Hz flash, the face-identified timeout,
+// and acts as defense-in-depth re-assert across the entire right ring so MCP
+// writes / dance keyframes / future writers can't permanently clobber the
+// owned indicators.
 //
 // face_tracking calls onFaceDetected / onFaceLost on detection edges so the
-// IDLE <-> TALK transitions happen at the camera, not via the bridge round-trip.
+// IDLE <-> TALK transitions happen at the camera, not via the bridge round-trip;
+// the same hooks also drive the face-state LED. The bridge calls
+// setFaceIdentified() via the self.robot.set_face_identified MCP tool after
+// the room-view VLM matches a household roster entry.
 class StateManager : public Modifier {
 public:
     static constexpr const char* kName = "state_manager";
@@ -46,16 +53,24 @@ public:
     // The state arc paints all 6 left pixels, so no left-ring index constant
     // is needed. RightNeonLight uses LOCAL 0-5 internally and adds 6 — see
     // neon_light.cpp:103-112 — so the right-ring writes use local indices.
-    static constexpr uint8_t kKidModePipRightLocal   = 2;  // global 8
-    static constexpr uint8_t kSmartModePipRightLocal = 3;  // global 9
+    static constexpr uint8_t kFacePipRightLocal           = 0;  // global 6
+    static constexpr uint8_t kReservedPipRightLocal_7     = 1;  // global 7
+    static constexpr uint8_t kKidModePipRightLocal        = 2;  // global 8
+    static constexpr uint8_t kSmartModePipRightLocal      = 3;  // global 9
+    static constexpr uint8_t kReservedPipRightLocal_10    = 4;  // global 10
+    static constexpr uint8_t kListeningPipRightLocal      = 5;  // global 11
 
-    // 5 Hz tick. Drives the SECURITY 1 Hz flash phase + acts as
-    // defense-in-depth re-assert in case any future writer clobbers the
-    // state arc or toggle pips. Today nothing else paints left 0-5 or
-    // right 8/9 — but cheap insurance has a place.
+    // 5 Hz tick. Drives the SECURITY 1 Hz flash phase, the face-identified
+    // timeout, and acts as defense-in-depth re-assert across the entire
+    // right ring (face / reserved / kid / smart / listening).
     static constexpr uint32_t kReassertIntervalMs = 200;
     // 1 Hz flash for SECURITY: 500 ms on, 500 ms off.
     static constexpr uint32_t kSecurityFlashHalfMs = 500;
+    // Face-identified auto-timeout. Bridge refreshes by calling
+    // self.robot.set_face_identified again after each successful room-view
+    // identification. If the bridge goes silent, the green pip reverts to
+    // yellow (face still in frame) or off (face gone) after this window.
+    static constexpr uint32_t kFaceIdentifiedTimeoutMs = 4000;
 
     const char* name() const override { return kName; }
 
@@ -92,6 +107,20 @@ public:
     // (head-pet is non-conversational, so we don't auto-engage TALK).
     void onHeadPet();
 
+    // Right-ring listening pixel (global 11). Called from stackchan_display.cc
+    // SetStatus() at LISTENING / STANDBY / SPEAKING transitions. Pure flag
+    // flip — no state-machine side effects. The state-transition logic lives
+    // in onVoiceListening / onVoiceStandby above.
+    void setListening(bool on);
+
+    // Right-ring face-state pixel (global 6). Called from the
+    // self.robot.set_face_identified MCP tool when the bridge's room-view
+    // VLM matches a household roster entry. No-op if no face is currently
+    // detected (no point lighting green for a face that isn't there).
+    // The 5 Hz tick auto-reverts to Detected (or Off) after
+    // kFaceIdentifiedTimeoutMs of no refresh.
+    void setFaceIdentified();
+
     void _update(Modifiable& stackchan) override;
 
 private:
@@ -113,11 +142,20 @@ private:
     static void securityPanTaskEntry(void* arg);
     void runSecurityPanLoop();
 
-    State    _state            = State::IDLE;
-    bool     _kid_mode         = false;
-    bool     _smart_mode       = false;
-    uint32_t _state_change_ms  = 0;
-    uint32_t _last_assert_ms   = 0;
+    // Face-state pixel (global 6) tri-state. Detected wins on face_detected;
+    // Identified wins on the MCP tool call but only while a face is in frame
+    // and only for kFaceIdentifiedTimeoutMs after each refresh.
+    enum class FaceState : uint8_t { Off, Detected, Identified };
+
+    State     _state            = State::IDLE;
+    bool      _kid_mode         = false;
+    bool      _smart_mode       = false;
+    bool      _listening        = false;
+    bool      _face_detected    = false;
+    FaceState _face_state       = FaceState::Off;
+    uint32_t  _face_state_set_ms = 0;
+    uint32_t  _state_change_ms  = 0;
+    uint32_t  _last_assert_ms   = 0;
     // Phase 5 — true while we've taken the sleep pose (yaw=0 pitch=450) but
     // motion is still settling. _update releases servo torque once the move
     // completes so the head can droop under gravity.
