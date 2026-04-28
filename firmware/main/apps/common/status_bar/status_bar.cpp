@@ -113,6 +113,15 @@ public:
 
     void update() override
     {
+        // PCF8563 RTC can boot with stale or factory-default time when the
+        // coin battery is missing/depleted; trust only an SNTP-confirmed
+        // sync before showing the clock. Until then, render an em-dash
+        // placeholder so the user can see "syncing" rather than a wrong time.
+        if (!GetHAL().isTimeSynced()) {
+            _label->setText("—:— ——");
+            return;
+        }
+
         auto now   = std::chrono::system_clock::now();
         auto now_t = std::chrono::system_clock::to_time_t(now);
 

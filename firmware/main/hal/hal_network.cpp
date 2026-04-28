@@ -19,11 +19,22 @@
 
 static std::string _tag           = "Network";
 static bool _is_network_connected = false;
+// Set true when esp-sntp confirms a sync via the notification cb.
+// Read via Hal::isTimeSynced() so the status bar can hide the clock until
+// the on-board RTC has been corrected (PCF8563 boots stale when the coin
+// battery is missing/depleted).
+static std::atomic<bool> _sntp_synced{false};
 
 static void time_sync_notification_cb(struct timeval* tv)
 {
     mclog::tagInfo(_tag, "SNTP time synchronized");
     GetHAL().syncSystemTimeToRtc();
+    _sntp_synced.store(true, std::memory_order_release);
+}
+
+bool Hal::isTimeSynced() const
+{
+    return _sntp_synced.load(std::memory_order_acquire);
 }
 
 void Hal::startSntp()

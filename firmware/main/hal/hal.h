@@ -240,6 +240,11 @@ public:
     void syncSystemTimeToRtc();
     void setTimezone(std::string_view tz);
     std::string getTimezone();
+    // True iff SNTP has confirmed a time sync since boot. The on-board RTC
+    // (PCF8563) can boot with stale or factory-default time when the coin
+    // battery is missing/depleted, so the status bar uses this flag to hide
+    // the clock display until a real network sync lands.
+    bool isTimeSynced() const;
 
     /* --------------------------------- EspNow --------------------------------- */
     uitk::Signal<const std::vector<uint8_t>&> onEspNowData;
