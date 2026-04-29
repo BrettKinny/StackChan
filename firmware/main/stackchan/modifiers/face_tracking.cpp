@@ -256,11 +256,18 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 // post-TTS. Tag with "face" so server logs can tell
                 // this trigger from a real wake-word detection.
                 //
-                // Phase 3 — gated on the IDLE profile only. With the
-                // modifier now alive across LISTENING/SPEAKING, a face
-                // re-acquired mid-chat must NOT re-trigger wake-word —
-                // that would interrupt the running session.
-                if (_profile.allow_wake_word_invoke) {
+                // Gate WakeWordInvoke on the authoritative device state.
+                // The earlier _profile.allow_wake_word_invoke gate was IDLE-only
+                // by design but lagged: stackchan_display.cc::SetStatus pushes
+                // LISTENING/SPEAKING into the profile, and on a flickering
+                // walk-in the modifier can cycle Idle->Tracking->GracePeriod->Idle
+                // (800 ms grace) faster than the first invoke's state propagates
+                // back. Result observed 2026-04-29: two AfeWakeWord encodes per
+                // walk-in, two TTS chunks ~280 ms apart, garbled playback.
+                // GetDeviceState() reflects the device state machine directly,
+                // so the second acquisition while the first session is still
+                // SPEAKING/LISTENING is suppressed at the call site.
+                if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
                     Application::GetInstance().WakeWordInvoke("face");
                 }
             }
