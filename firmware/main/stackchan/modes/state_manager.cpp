@@ -257,16 +257,25 @@ void StateManager::onEnterSleep()
     //    state-change (set_state MCP). Face-wake and wake-word-wake are
     //    intentionally suppressed.
     FaceDetector::getInstance().setEnabled(false);
-    // 6. Privacy sleep — flip xiaozhi's privacy gate. The gate forces
-    //    xiaozhi to kDeviceStateIdle (clears any in-flight LISTENING/
-    //    SPEAKING and the listening LED via the normal state-change
-    //    plumbing), disables wake-word + voice processing, and pins them
-    //    off across subsequent kDeviceStateIdle transitions so xiaozhi's
-    //    HandleStateChangedEvent stops re-enabling them mid-sleep. Single
-    //    write — no tick-loop re-assert. Cleared on onExitSleep.
+    // 6. Clear the listening LED edge. If sleep was triggered by voice
+    //    ("go to sleep dotty"), xiaozhi was in LISTENING when this hook
+    //    fires and the red pip is currently lit. The privacy gate's
+    //    forced SetDeviceState(kDeviceStateIdle) is gated to skip display
+    //    side-effects (so it doesn't clobber Sleepy + Zzz), so we have
+    //    to flip the listening flag ourselves — next 5 Hz pip repaint
+    //    extinguishes the red pip.
+    setListening(false);
+    // 7. Privacy sleep — flip xiaozhi's privacy gate. The gate forces
+    //    xiaozhi to kDeviceStateIdle, disables wake-word + voice
+    //    processing, and pins those disables across subsequent display-
+    //    state transitions (kDeviceStateIdle / Listening / Speaking
+    //    cases all skip their display+audio entry while gated) so
+    //    xiaozhi's HandleStateChangedEvent can't re-arm or re-paint
+    //    mid-sleep. Single write — no tick-loop re-assert. Cleared on
+    //    onExitSleep.
     Application::GetInstance().SetPrivacyGate(true);
     mclog::tagInfo(_tag, "sleep: pose initiated, lock taken, torque release deferred, "
-                         "camera + mic disabled (privacy sleep)");
+                         "camera + mic disabled, listening pip cleared (privacy sleep)");
 }
 
 void StateManager::onExitSleep()
