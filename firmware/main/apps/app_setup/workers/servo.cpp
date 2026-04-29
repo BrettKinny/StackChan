@@ -141,7 +141,7 @@ public:
             mclog::tagInfo(_tag, "go home");
 
             auto& motion = GetStackChan().motion();
-            motion.goHome(666);
+            motion.goHome(666, "app_setup_go_home_button");
         }
 
         if (_reset_default_flag) {
@@ -328,19 +328,19 @@ private:
             case Step::GoHome3:
             case Step::GoHome4:
                 _info->setText("Returning to\nthe home position...");
-                motion.goHome(_move_speed);
+                motion.goHome(_move_speed, "app_setup_home");
                 break;
             case Step::Left90:
                 _info->setText("Moving left...");
-                motion.moveWithSpeed(900, 0, _move_speed);
+                motion.moveWithSpeed(900, 0, _move_speed, "app_setup_left90");
                 break;
             case Step::Right90:
                 _info->setText("Moving right...");
-                motion.moveWithSpeed(-900, 0, _move_speed);
+                motion.moveWithSpeed(-900, 0, _move_speed, "app_setup_right90");
                 break;
             case Step::Up90:
                 _info->setText("Moving up...");
-                motion.moveWithSpeed(0, 900, _move_speed);
+                motion.moveWithSpeed(0, 900, _move_speed, "app_setup_up90");
                 break;
         }
     }

@@ -25,7 +25,7 @@ void Keyframe::apply()
     apply_feature(rightEye, avatar.rightEye());
     apply_feature(mouth, avatar.mouth());
 
-    auto apply_servo = [&](const ServoKeyframe& kf, motion::Servo& servo) { servo.moveWithSpeed(kf.angle, kf.speed); };
+    auto apply_servo = [&](const ServoKeyframe& kf, motion::Servo& servo) { servo.moveWithSpeed(kf.angle, kf.speed, "keyframe_servo"); };
     apply_servo(yawServo, motion.yawServo());
     apply_servo(pitchServo, motion.pitchServo());
 

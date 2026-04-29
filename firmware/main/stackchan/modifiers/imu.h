@@ -57,7 +57,7 @@ public:
             auto& motion = stackchan.motion();
             if (!motion.isModifyLocked()) {
                 motion.setModifyLock(true);
-                motion.goHome(300);
+                motion.goHome(300, "imu_shake_react");
             }
 
             // 检查是否结束反应

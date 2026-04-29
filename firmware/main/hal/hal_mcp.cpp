@@ -62,10 +62,10 @@ void Hal::xiaozhi_mcp_init()
 
                            auto& motion = GetStackChan().motion();
                            if (pitch != -9999) {
-                               motion.pitchServo().moveWithSpeed(pitch * 10, speed);
+                               motion.pitchServo().moveWithSpeed(pitch * 10, speed, "mcp_set_head_angles");
                            }
                            if (yaw != -9999) {
-                               motion.yawServo().moveWithSpeed(yaw * 10, speed);
+                               motion.yawServo().moveWithSpeed(yaw * 10, speed, "mcp_set_head_angles");
                            }
 
                            return true;

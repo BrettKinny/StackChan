@@ -5,10 +5,13 @@
  */
 #include "servo.h"
 #include <hal/hal.h>
+#include "esp_log.h"
 
 using namespace uitk;
 
 namespace stackchan::motion {
+
+static const char* TAG_SERVO = "motion";  // shares grep tag with Motion-level log
 
 static SpringOptions_t _default_spring_options = {
     .stiffness = 170.0,
@@ -81,8 +84,10 @@ void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
     update_angle_anim_target(angle);
 }
 
-void Servo::moveWithSpeed(int angle, int speed)
+void Servo::moveWithSpeed(int angle, int speed, const char* tag)
 {
+    ESP_LOGI(TAG_SERVO, "HEADMOVE [%s] servo angle=%d speed=%d t=%lu",
+             tag, angle, speed, (unsigned long)GetHAL().millis());
     auto spring_options = map_speed_to_spring_options(speed);
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }

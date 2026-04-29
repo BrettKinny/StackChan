@@ -82,7 +82,7 @@ private:
             target_pitch = _prev_angles.y + Random::getInstance().getInt(-5, 15);
         }
 
-        motion.moveWithSpeed(target_yaw, target_pitch, speed);
+        motion.moveWithSpeed(target_yaw, target_pitch, speed, "thinking");
     }
 
     const int _pursed_weight = 8;

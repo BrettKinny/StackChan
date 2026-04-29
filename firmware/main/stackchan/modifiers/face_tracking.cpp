@@ -328,7 +328,7 @@ void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
             return;  // inside deadband — keep current servo target
         }
     }
-    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, kLookAtSpeed);
+    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, kLookAtSpeed, "face_tracking");
     _last_cmd_x = _smooth_x;
     _last_cmd_y = _smooth_y;
     _last_cmd_valid = true;
