@@ -10,7 +10,6 @@
 #include "../modifiers/dance.h"
 #include "../avatar/avatar/elements/emotion.h"
 #include "application.h"
-#include "audio_service.h"
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <cstdio>
@@ -258,13 +257,14 @@ void StateManager::onEnterSleep()
     //    state-change (set_state MCP). Face-wake and wake-word-wake are
     //    intentionally suppressed.
     FaceDetector::getInstance().setEnabled(false);
-    // 6. Privacy sleep — disable mic-side audio processing. WakeWord stops
-    //    the wake-word detector loop; VoiceProcessing stops the AFE/AEC
-    //    pipeline. With both off, no audio is captured or streamed to
-    //    xiaozhi-server. Re-enabled on onExitSleep.
-    auto& as = Application::GetInstance().GetAudioService();
-    as.EnableWakeWordDetection(false);
-    as.EnableVoiceProcessing(false);
+    // 6. Privacy sleep — flip xiaozhi's privacy gate. The gate forces
+    //    xiaozhi to kDeviceStateIdle (clears any in-flight LISTENING/
+    //    SPEAKING and the listening LED via the normal state-change
+    //    plumbing), disables wake-word + voice processing, and pins them
+    //    off across subsequent kDeviceStateIdle transitions so xiaozhi's
+    //    HandleStateChangedEvent stops re-enabling them mid-sleep. Single
+    //    write — no tick-loop re-assert. Cleared on onExitSleep.
+    Application::GetInstance().SetPrivacyGate(true);
     mclog::tagInfo(_tag, "sleep: pose initiated, lock taken, torque release deferred, "
                          "camera + mic disabled (privacy sleep)");
 }
@@ -288,12 +288,12 @@ void StateManager::onExitSleep()
         sc.avatar().setEmotion(avatar::Emotion::Neutral);
         sc.avatar().setSpeech("");
     }
-    // 5. Privacy sleep teardown — re-enable camera + mic so face tracking
-    //    and wake-word detection resume in the post-sleep state. Mirrors
-    //    xiaozhi's HandleStateChangedEvent kDeviceStateIdle behaviour
-    //    (wake-word on, voice processing off until LISTENING).
+    // 5. Privacy sleep teardown — re-enable camera + lift xiaozhi's
+    //    privacy gate. Lifting the gate restores xiaozhi's normal idle-
+    //    state defaults (wake-word on, voice processing off until
+    //    LISTENING).
     FaceDetector::getInstance().setEnabled(true);
-    Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+    Application::GetInstance().SetPrivacyGate(false);
     mclog::tagInfo(_tag, "sleep: woke; torque on, lock released, wake-pose initiated, "
                          "camera + mic re-enabled");
 }
