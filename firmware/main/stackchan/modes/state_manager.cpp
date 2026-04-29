@@ -513,9 +513,9 @@ void StateManager::writePips(Modifiable& stackchan, uint32_t now)
 
     // Pixel 8: kid_mode pip.
     if (_kid_mode) {
-        // Warm pink — RGB565 quantises hard, so this hue (slightly red-shifted)
-        // is what reads as "soft pink" once the PY32 IO expander rounds it.
-        stackchan.rightNeonLight().setColorAt(kKidModePipRightLocal, 168, 80, 100);
+        // Salmon pink — G == B prevents the RGB565 cool cast that made the prior
+        // (168,80,100) hue read as purple/magenta after PY32 quantization.
+        stackchan.rightNeonLight().setColorAt(kKidModePipRightLocal, 220, 80, 80);
     } else {
         stackchan.rightNeonLight().setColorAt(kKidModePipRightLocal, 0, 0, 0);
     }
