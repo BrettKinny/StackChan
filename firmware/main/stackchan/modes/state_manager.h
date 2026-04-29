@@ -71,6 +71,13 @@ public:
     // identification. If the bridge goes silent, the green pip reverts to
     // yellow (face still in frame) or off (face gone) after this window.
     static constexpr uint32_t kFaceIdentifiedTimeoutMs = 4000;
+    // setFaceIdentified() will accept the call even when no face is currently
+    // detected, provided face_lost fired within this window. Bridges the
+    // 800 ms detector-flicker the HuMan model exhibits at typical lighting +
+    // pose so a brief drop between bridge VLM completion and MCP delivery
+    // doesn't no-op the green pip. Set tighter than kFaceIdentifiedTimeoutMs
+    // so a long-departed face can't accidentally re-light it.
+    static constexpr uint32_t kFaceIdentifiedFlickerGraceMs = 1500;
     // Privacy sleep — bound on how long the servos stay torqued after sleep
     // entry. The preferred path (motion.isMoving() reporting settled) fires
     // first when the goHome pose converges cleanly; this is the fallback
@@ -169,6 +176,10 @@ private:
     bool      _face_detected    = false;
     FaceState _face_state       = FaceState::Off;
     uint32_t  _face_state_set_ms = 0;
+    // Last onFaceLost() timestamp (millis). Used by setFaceIdentified() to
+    // accept the MCP across the brief detector flicker (see
+    // kFaceIdentifiedFlickerGraceMs).
+    uint32_t  _last_face_lost_ms = 0;
     uint32_t  _state_change_ms  = 0;
     uint32_t  _last_assert_ms   = 0;
     // Phase 5 — true while we've taken the sleep pose (yaw=0 pitch=450) but

@@ -156,6 +156,7 @@ void StateManager::onFaceLost()
     _face_detected = false;
     _face_state = FaceState::Off;
     _last_assert_ms = 0;
+    _last_face_lost_ms = GetHAL().millis();
 
     // Only TALK -> IDLE on face_lost. The grace-period check has already
     // happened in face_tracking before this call site, so by the time we land
@@ -167,19 +168,35 @@ void StateManager::onFaceLost()
 
 void StateManager::setFaceIdentified()
 {
-    // No-op if no face is in frame — lighting green for an empty room would
-    // be misleading. Bridge calls this only on successful VLM roster match,
-    // which implies a face was just captured, but the camera lifecycle
-    // can race: by the time the call lands, face_tracking may already have
-    // fired face_lost. Defensive guard.
-    if (!_face_detected) {
-        mclog::tagInfo(_tag, "set_face_identified ignored: no face currently detected");
+    // Bridge calls this on every successful room-view VLM match. The HuMan
+    // detector flickers (face_detected/face_lost pairs ~1 s apart even when
+    // a person is plainly in frame), so a strict `_face_detected` guard
+    // would no-op the call any time the bbox briefly drops out between the
+    // bridge logging name-greet and the MCP arriving (~150-300 ms). We
+    // accept the call if a face is currently detected OR was lost within
+    // kFaceIdentifiedFlickerGraceMs.
+    //
+    // Both outcomes emit a perception event so the bridge dashboard can
+    // see whether the firmware actually lit the green pip — `applied`
+    // means it did, `rejected` means the gap exceeded the grace window
+    // and the call was a no-op (person genuinely left the frame).
+    uint32_t now = GetHAL().millis();
+    bool fresh_loss = _last_face_lost_ms != 0
+        && (now - _last_face_lost_ms) <= kFaceIdentifiedFlickerGraceMs;
+    if (!_face_detected && !fresh_loss) {
+        mclog::tagInfo(_tag,
+            "set_face_identified rejected: no face detected, last loss {} ms ago",
+            _last_face_lost_ms ? (now - _last_face_lost_ms) : 0);
+        Application::GetInstance().SendEvent("face_identified_rejected", "{}");
         return;
     }
     _face_state = FaceState::Identified;
-    _face_state_set_ms = GetHAL().millis();
+    _face_state_set_ms = now;
     _last_assert_ms = 0;
-    mclog::tagInfo(_tag, "face identified — green pip lit for {} ms", kFaceIdentifiedTimeoutMs);
+    mclog::tagInfo(_tag,
+        "face identified ({}) — green pip lit for {} ms",
+        _face_detected ? "live" : "flicker-grace", kFaceIdentifiedTimeoutMs);
+    Application::GetInstance().SendEvent("face_identified_applied", "{}");
 }
 
 void StateManager::setListening(bool on)
