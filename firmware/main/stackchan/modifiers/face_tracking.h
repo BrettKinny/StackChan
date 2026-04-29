@@ -110,6 +110,13 @@ private:
     uint32_t _capture_guard_acquired_ms       = 0;
     uint32_t _capture_guard_baseline_capture_ts = 0;
 
+    // Decremented per actually-issued lookAt command (not per tick) so
+    // deadband-skipped ticks don't burn the throttle budget. While > 0
+    // _maybeIssueLookAt uses kPostReleaseLookAtSpeed instead of
+    // kLookAtSpeed. See face_tracking.cpp constants block for the
+    // bench history that motivated this.
+    uint8_t _post_release_throttle = 0;
+
     // Phase 0 instrumentation — counters reset every kPhase0WindowMs.
     // See probes/face-tracking-naturalness.md for the bench procedure.
     // Cheap to leave in place; one ESP_LOGI line per 5 s window.

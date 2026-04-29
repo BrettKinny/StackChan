@@ -60,6 +60,24 @@ static constexpr float kEmaAlpha     = 0.7f;   // history: 0.3f → 0.5f → 0.7
 static constexpr int   kLookAtSpeed  = 500;    // unchanged in Phase 1
 static constexpr float kDeadbandFrac = 0.02f;  // history: 0.06f → 0.02f (Phase 1)
 
+// Post-capture-release throttle. Bench trace 2026-04-29 caught the
+// "take a photo, immediately turn away" symptom as a single
+// face_tracking lookAt at speed=500 issued in the same millisecond
+// the capture-pending guard released — with a prior idle_motion move
+// still in flight (isMoving=1). The fast spring under the prior
+// trajectory's velocity reads as a violent snap. We use a softer
+// spring (kPostReleaseLookAtSpeed) for the first kPostReleaseThrottle
+// commands actually issued after release; the deadband + last_cmd
+// re-seed at release time can also suppress the first command
+// entirely if the user hasn't moved much during the lock window.
+//
+// Counter decrements per *issued* command, not per tick — otherwise
+// a deadband-skipped tick would burn the throttle budget without
+// taking a turn. Soft enough that subsequent normal-speed tracking
+// resumes within a fraction of a second.
+static constexpr int kPostReleaseLookAtSpeed = 200;
+static constexpr uint8_t kPostReleaseThrottle = 2;
+
 // Capture-pending guard ceiling. Bridge's typical first take_photo round-trip
 // is 200-800 ms; 5 s gives ~6× headroom and unblocks idle motion before the
 // user notices the freeze if take_photo never arrives (bridge container down,
@@ -128,7 +146,18 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
             if (detected) {
                 _smooth_x = raw_x;
                 _smooth_y = raw_y;
+                // Re-seed last_cmd from the live face position so the
+                // deadband can suppress the first post-release command
+                // when the user hasn't moved much during the lock window.
+                // _last_cmd_valid was reset on Idle→Tracking; without
+                // this seed the first command always fires no matter
+                // how small the delta. See kPostReleaseLookAtSpeed
+                // comment for the wider context.
+                _last_cmd_x = raw_x;
+                _last_cmd_y = raw_y;
+                _last_cmd_valid = true;
             }
+            _post_release_throttle = kPostReleaseThrottle;
             ESP_LOGI(TAG, "capture-pending guard released (capture observed dt=%u ms)",
                      (unsigned)held_ms);
         } else if (held_ms > kCaptureGuardTimeoutMs) {
@@ -137,7 +166,14 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
             if (detected) {
                 _smooth_x = raw_x;
                 _smooth_y = raw_y;
+                // Same rationale as the observed-capture branch — after
+                // a 5 s timeout the head has been frozen even longer,
+                // so a softer first command matters more, not less.
+                _last_cmd_x = raw_x;
+                _last_cmd_y = raw_y;
+                _last_cmd_valid = true;
             }
+            _post_release_throttle = kPostReleaseThrottle;
             ESP_LOGW(TAG, "capture-pending guard timeout-release (%u ms — take_photo never arrived)",
                      (unsigned)held_ms);
         }
@@ -328,7 +364,12 @@ void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
             return;  // inside deadband — keep current servo target
         }
     }
-    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, kLookAtSpeed);
+    int speed = kLookAtSpeed;
+    if (_post_release_throttle > 0) {
+        speed = kPostReleaseLookAtSpeed;
+        _post_release_throttle--;
+    }
+    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, speed);
     _last_cmd_x = _smooth_x;
     _last_cmd_y = _smooth_y;
     _last_cmd_valid = true;
