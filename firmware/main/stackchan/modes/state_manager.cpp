@@ -5,10 +5,12 @@
  */
 #include "state_manager.h"
 #include "../stackchan.h"
+#include "../face/face_detector.h"
 #include "../modifiers/idle_motion.h"
 #include "../modifiers/dance.h"
 #include "../avatar/avatar/elements/emotion.h"
 #include "application.h"
+#include "audio_service.h"
 #include <hal/hal.h>
 #include <mooncake_log.h>
 #include <cstdio>
@@ -139,11 +141,11 @@ void StateManager::onFaceDetected()
     // exactly what security mode is watching for (the bridge handles that
     // transition explicitly via set_state MCP, not here).
     //
-    // Phase 5 — SLEEP also wakes on face_detected; we go straight to TALK so
-    // the conversation path engages without an extra IDLE hop. The exit
-    // hook runs the wake-pose; face_tracking's lookAt overrides it within a
-    // few ticks, which is the desired feel ("Dotty looks up, then at you").
-    if (_state == State::IDLE || _state == State::SLEEP) {
+    // Privacy sleep: face_detector is disabled on enter-sleep, so this
+    // path shouldn't fire from SLEEP at all. The explicit IDLE-only guard
+    // is defense-in-depth in case a stale frame races the detector teardown.
+    // Wake from SLEEP is touch-or-dashboard only.
+    if (_state == State::IDLE) {
         setState(State::TALK);
     }
 }
@@ -191,13 +193,14 @@ void StateManager::setListening(bool on)
 void StateManager::onVoiceListening()
 {
     // xiaozhi entered LISTENING — user is taking a conversational turn.
-    // Same edge as face_detected for the mutex transition: IDLE/SLEEP -> TALK.
-    // Sticky states (STORY_TIME/SECURITY/DANCE) own their own exits.
+    // IDLE -> TALK. Sticky states (STORY_TIME/SECURITY/DANCE) own their
+    // own exits.
     //
-    // This is the parallel-presence signal: face presence drives the same
-    // transition, but voice presence is enough on its own when face
-    // detection is unavailable (camera streamoff, lens covered, etc.).
-    if (_state == State::IDLE || _state == State::SLEEP) {
+    // Privacy sleep: wake-word detection and voice processing are disabled
+    // on enter-sleep, so xiaozhi shouldn't reach LISTENING from SLEEP at
+    // all. The explicit IDLE-only guard is defense-in-depth — wake from
+    // SLEEP is touch-or-dashboard only.
+    if (_state == State::IDLE) {
         setState(State::TALK);
     }
 }
@@ -227,9 +230,8 @@ void StateManager::onEnterSleep()
     auto& sc = ::GetStackChan();
     // 1. Avatar to sleepy + Zzz speech bubble. Direct API — bypasses
     //    StackChanAvatarDisplay::SetEmotion("sleepy"), which has its own
-    //    legacy hard-sleep path (face_detector off, modifiers removed) that
-    //    we explicitly do NOT want here — Phase 5 sleep keeps face detection
-    //    alive so face_detected wakes Dotty back up.
+    //    legacy hard-sleep path that this hook now mirrors deliberately
+    //    (privacy sleep: camera + mic off, wake = touch or dashboard only).
     if (sc.hasAvatar()) {
         sc.avatar().setEmotion(avatar::Emotion::Sleepy);
         sc.avatar().setSpeech("Zzz…");
@@ -248,7 +250,23 @@ void StateManager::onEnterSleep()
     //    safe. Torque-off mid-move would freeze the head wherever it
     //    happens to be, which is uglier than the brief drop after settling.
     _sleep_torque_release_pending = true;
-    mclog::tagInfo(_tag, "sleep: pose initiated, lock taken, torque release deferred");
+    // 5. Privacy sleep — disable the camera-driven face detector. The
+    //    refcounted CameraStreamGuard inside FaceDetector::taskEntry releases
+    //    on the next tick once `_enabled` flips false, which runs
+    //    VIDIOC_STREAMOFF on the V4L2 device when no other consumer is active.
+    //    Wake mechanisms that survive: head-pet (capacitive) and dashboard
+    //    state-change (set_state MCP). Face-wake and wake-word-wake are
+    //    intentionally suppressed.
+    FaceDetector::getInstance().setEnabled(false);
+    // 6. Privacy sleep — disable mic-side audio processing. WakeWord stops
+    //    the wake-word detector loop; VoiceProcessing stops the AFE/AEC
+    //    pipeline. With both off, no audio is captured or streamed to
+    //    xiaozhi-server. Re-enabled on onExitSleep.
+    auto& as = Application::GetInstance().GetAudioService();
+    as.EnableWakeWordDetection(false);
+    as.EnableVoiceProcessing(false);
+    mclog::tagInfo(_tag, "sleep: pose initiated, lock taken, torque release deferred, "
+                         "camera + mic disabled (privacy sleep)");
 }
 
 void StateManager::onExitSleep()
@@ -259,10 +277,7 @@ void StateManager::onExitSleep()
     //    pose hadn't settled yet (wake came in mid-pose).
     sc.motion().setTorqueEnabled(true);
     _sleep_torque_release_pending = false;
-    // 2. Wake-up tilt: gentle bow lift to ~70 pitch, yaw centred. If
-    //    face_tracking is acquiring at the same time (SLEEP -> TALK via
-    //    face_detected), its lookAt will override within a few ticks —
-    //    that's the desired feel ("Dotty looks up, then at you").
+    // 2. Wake-up tilt: gentle bow lift to ~70 pitch, yaw centred.
     Application::GetInstance().SendEvent("sleep_pose", "{\"phase\":\"wake_tilt\"}");
     sc.motion().moveWithSpeed(0, 70, 80, "state_manager_wake_tilt");
     // 3. Release the modify lock so idle_motion (now back on the NORMAL
@@ -273,7 +288,14 @@ void StateManager::onExitSleep()
         sc.avatar().setEmotion(avatar::Emotion::Neutral);
         sc.avatar().setSpeech("");
     }
-    mclog::tagInfo(_tag, "sleep: woke; torque on, lock released, wake-pose initiated");
+    // 5. Privacy sleep teardown — re-enable camera + mic so face tracking
+    //    and wake-word detection resume in the post-sleep state. Mirrors
+    //    xiaozhi's HandleStateChangedEvent kDeviceStateIdle behaviour
+    //    (wake-word on, voice processing off until LISTENING).
+    FaceDetector::getInstance().setEnabled(true);
+    Application::GetInstance().GetAudioService().EnableWakeWordDetection(true);
+    mclog::tagInfo(_tag, "sleep: woke; torque on, lock released, wake-pose initiated, "
+                         "camera + mic re-enabled");
 }
 
 void StateManager::onEnterSecurity()

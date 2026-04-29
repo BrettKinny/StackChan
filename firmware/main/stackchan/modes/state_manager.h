@@ -89,7 +89,9 @@ public:
     // Camera-edge hooks. Called from face_tracking.cpp inside the same
     // tick as the SendEvent("face_detected"|"face_lost", ...) emissions.
     // STORY_TIME / SECURITY / DANCE are sticky and intentionally unaffected
-    // by camera edges; SLEEP wakes on face_detected (Phase 5).
+    // by camera edges. SLEEP disables the face detector outright (privacy
+    // sleep), so these hooks shouldn't fire from SLEEP — wake mechanisms
+    // are head-pet (capacitive) and dashboard set_state.
     void onFaceDetected();
     void onFaceLost();
 
