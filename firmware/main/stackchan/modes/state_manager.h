@@ -71,6 +71,12 @@ public:
     // identification. If the bridge goes silent, the green pip reverts to
     // yellow (face still in frame) or off (face gone) after this window.
     static constexpr uint32_t kFaceIdentifiedTimeoutMs = 4000;
+    // Privacy sleep — bound on how long the servos stay torqued after sleep
+    // entry. The preferred path (motion.isMoving() reporting settled) fires
+    // first when the goHome pose converges cleanly; this is the fallback
+    // for cases where the SCS-bus busy poll keeps reporting moving even at
+    // rest. 3 s is generous vs the ~1 s goHome at speed 80 takes to converge.
+    static constexpr uint32_t kSleepTorqueReleaseTimeoutMs = 3000;
 
     const char* name() const override { return kName; }
 

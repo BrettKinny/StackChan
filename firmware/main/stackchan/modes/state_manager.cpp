@@ -575,14 +575,26 @@ void StateManager::_update(Modifiable& stackchan)
 {
     uint32_t now = GetHAL().millis();
 
-    // Phase 5 — release servo torque once the sleep-entry pose settles.
-    // Polling each tick is cheap (just a flag check + isMoving()); the work
-    // only fires once per sleep entry.
-    if (_sleep_torque_release_pending && _state == State::SLEEP &&
-        !stackchan.motion().isMoving()) {
-        stackchan.motion().setTorqueEnabled(false);
-        _sleep_torque_release_pending = false;
-        mclog::tagInfo(_tag, "sleep: torque released (pose settled)");
+    // Privacy sleep — release servo torque so the servos aren't powered for
+    // the duration of sleep (longevity + heat). Two paths to fire:
+    //   1. Pose settled cleanly — preferred. isMoving() polls the SCS bus
+    //      which can keep reporting busy if the servo holds position with
+    //      micro-corrections, so this isn't always reachable.
+    //   2. Timeout fallback at kSleepTorqueReleaseTimeoutMs after sleep
+    //      entry. goHome at speed 80 should converge in ~1 s; 3 s is a
+    //      generous deadline that bounds servo-on time even when the bus
+    //      check never reports settled.
+    // Either path is one-shot — _sleep_torque_release_pending clears on
+    // first fire.
+    if (_sleep_torque_release_pending && _state == State::SLEEP) {
+        const bool settled = !stackchan.motion().isMoving();
+        const bool timeout = (now - _state_change_ms) > kSleepTorqueReleaseTimeoutMs;
+        if (settled || timeout) {
+            stackchan.motion().setTorqueEnabled(false);
+            _sleep_torque_release_pending = false;
+            mclog::tagInfo(_tag, "sleep: torque released ({})",
+                           settled ? "pose settled" : "timeout fallback");
+        }
     }
 
     // 5 Hz tick. Primary purpose is driving the SECURITY 1 Hz flash —
