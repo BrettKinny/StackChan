@@ -376,7 +376,7 @@ void FaceTrackingModifier::_maybeIssueLookAt(Modifiable& stackchan)
         speed = kPostReleaseLookAtSpeed;
         _post_release_throttle--;
     }
-    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, speed);
+    stackchan.motion().lookAtNormalized(_smooth_x, _smooth_y, speed, "face_tracking");
     _last_cmd_x = _smooth_x;
     _last_cmd_y = _smooth_y;
     _last_cmd_valid = true;

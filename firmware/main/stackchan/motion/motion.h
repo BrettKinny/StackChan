@@ -61,8 +61,9 @@ public:
      *
      * @param angle
      * @param speed (0-1000)
+     * @param tag instrumentation label naming the writer (HEADMOVE log)
      */
-    void moveYawWithSpeed(int angle, int speed);
+    void moveYawWithSpeed(int angle, int speed, const char* tag = "unknown");
 
     /**
      * @brief
@@ -76,8 +77,9 @@ public:
      *
      * @param angle
      * @param speed (0-1000)
+     * @param tag instrumentation label naming the writer (HEADMOVE log)
      */
-    void movePitchWithSpeed(int angle, int speed);
+    void movePitchWithSpeed(int angle, int speed, const char* tag = "unknown");
 
     /**
      * @brief
@@ -93,15 +95,17 @@ public:
      * @param yawAngle
      * @param pitchAngle
      * @param speed (0-1000)
+     * @param tag instrumentation label naming the writer (HEADMOVE log)
      */
-    void moveWithSpeed(int yawAngle, int pitchAngle, int speed);
+    void moveWithSpeed(int yawAngle, int pitchAngle, int speed, const char* tag = "unknown");
 
     /**
      * @brief Move head to home position (0,0)
      *
      * @param speed (0-1000)
+     * @param tag instrumentation label naming the writer (HEADMOVE log)
      */
-    void goHome(int speed = 500);
+    void goHome(int speed = 500, const char* tag = "unknown");
 
     /**
      * @brief Stop head movement
@@ -127,7 +131,7 @@ public:
      * @note The actual angles are calculated based on the servo's `getAngleLimit()`.
      *       For example, if Pitch range is 0 to 900, y = -1.0 maps to 0 and y = 1.0 maps to 900.
      */
-    void lookAtNormalized(float x, float y, int speed = 500);
+    void lookAtNormalized(float x, float y, int speed = 500, const char* tag = "unknown");
 
     /**
      * @brief Directs the head to look at a target point in 3D Cartesian space.
@@ -147,7 +151,7 @@ public:
      *
      * @note If the target point is at (0,0,0), the behavior is undefined (mathematical singularity).
      */
-    void lookAtPoint(float x, float y, float z, int speed = 500);
+    void lookAtPoint(float x, float y, float z, int speed = 500, const char* tag = "unknown");
 
     bool isMoving();
     uitk::Vector2i getCurrentAngles();

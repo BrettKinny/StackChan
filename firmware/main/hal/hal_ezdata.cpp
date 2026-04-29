@@ -435,12 +435,12 @@ private:
         if (name == KEY_PITCH_SERVO_ANGLE) {
             if (value.is<float>()) {
                 float angle = value.as<float>();
-                motion.movePitchWithSpeed(angle * 10, _pitch_servo_speed);
+                motion.movePitchWithSpeed(angle * 10, _pitch_servo_speed, "ezdata_pitch");
             }
         } else if (name == KEY_YAW_SERVO_ANGLE) {
             if (value.is<float>()) {
                 float angle = value.as<float>();
-                motion.moveYawWithSpeed(angle * 10, _yaw_servo_speed);
+                motion.moveYawWithSpeed(angle * 10, _yaw_servo_speed, "ezdata_yaw");
             }
         } else if (name == KEY_PITCH_SERVO_SPEED) {
             if (value.is<int>()) {

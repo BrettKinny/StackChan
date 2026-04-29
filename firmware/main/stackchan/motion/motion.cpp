@@ -39,9 +39,13 @@ void Motion::moveYaw(int angle)
     _yaw_servo->move(angle);
 }
 
-void Motion::moveYawWithSpeed(int angle, int speed)
+void Motion::moveYawWithSpeed(int angle, int speed, const char* tag)
 {
-    _yaw_servo->moveWithSpeed(angle, speed);
+    ESP_LOGI(TAG, "HEADMOVE [%s] axis=yaw angle=%d speed=%d locked=%u isMoving=%d t=%u",
+             tag, angle, speed,
+             (unsigned)_modify_lock_count.load(std::memory_order_acquire),
+             (int)isMoving(), (unsigned)esp_log_timestamp());
+    _yaw_servo->moveWithSpeed(angle, speed, tag);
 }
 
 void Motion::movePitch(int angle)
@@ -49,9 +53,13 @@ void Motion::movePitch(int angle)
     _pitch_servo->move(angle);
 }
 
-void Motion::movePitchWithSpeed(int angle, int speed)
+void Motion::movePitchWithSpeed(int angle, int speed, const char* tag)
 {
-    _pitch_servo->moveWithSpeed(angle, speed);
+    ESP_LOGI(TAG, "HEADMOVE [%s] axis=pitch angle=%d speed=%d locked=%u isMoving=%d t=%u",
+             tag, angle, speed,
+             (unsigned)_modify_lock_count.load(std::memory_order_acquire),
+             (int)isMoving(), (unsigned)esp_log_timestamp());
+    _pitch_servo->moveWithSpeed(angle, speed, tag);
 }
 
 void Motion::move(int yawAngle, int pitchAngle)
@@ -60,16 +68,24 @@ void Motion::move(int yawAngle, int pitchAngle)
     _pitch_servo->move(pitchAngle);
 }
 
-void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
+void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed, const char* tag)
 {
-    _yaw_servo->moveWithSpeed(yawAngle, speed);
-    _pitch_servo->moveWithSpeed(pitchAngle, speed);
+    ESP_LOGI(TAG, "HEADMOVE [%s] yaw=%d pitch=%d speed=%d locked=%u isMoving=%d t=%u",
+             tag, yawAngle, pitchAngle, speed,
+             (unsigned)_modify_lock_count.load(std::memory_order_acquire),
+             (int)isMoving(), (unsigned)esp_log_timestamp());
+    _yaw_servo->moveWithSpeed(yawAngle, speed, tag);
+    _pitch_servo->moveWithSpeed(pitchAngle, speed, tag);
 }
 
-void Motion::goHome(int speed)
+void Motion::goHome(int speed, const char* tag)
 {
-    _yaw_servo->moveWithSpeed(0, speed);
-    _pitch_servo->moveWithSpeed(0, speed);
+    ESP_LOGI(TAG, "HEADMOVE [%s] goHome speed=%d locked=%u isMoving=%d t=%u",
+             tag, speed,
+             (unsigned)_modify_lock_count.load(std::memory_order_acquire),
+             (int)isMoving(), (unsigned)esp_log_timestamp());
+    _yaw_servo->moveWithSpeed(0, speed, tag);
+    _pitch_servo->moveWithSpeed(0, speed, tag);
 }
 
 void Motion::stop()
@@ -78,16 +94,16 @@ void Motion::stop()
     _pitch_servo->move(_pitch_servo->getCurrentAngle());
 }
 
-void Motion::lookAtNormalized(float x, float y, int speed)
+void Motion::lookAtNormalized(float x, float y, int speed, const char* tag)
 {
     int yaw_angle =
         uitk::map_range(x, -1.0f, 1.0f, (float)_yaw_servo->getAngleLimit().x, (float)_yaw_servo->getAngleLimit().y);
     int pitch_angle =
         uitk::map_range(y, -1.0f, 1.0f, (float)_pitch_servo->getAngleLimit().x, (float)_pitch_servo->getAngleLimit().y);
-    moveWithSpeed(yaw_angle, pitch_angle, speed);
+    moveWithSpeed(yaw_angle, pitch_angle, speed, tag);
 }
 
-void Motion::lookAtPoint(float x, float y, float z, int speed)
+void Motion::lookAtPoint(float x, float y, float z, int speed, const char* tag)
 {
     // Yaw: 绕 Z 轴旋转。使用 atan2(y, x)
     float yaw_rad = std::atan2(y, x);
@@ -100,7 +116,7 @@ void Motion::lookAtPoint(float x, float y, float z, int speed)
     int yaw_angle   = static_cast<int>(to_degrees(yaw_rad) * 10);
     int pitch_angle = static_cast<int>(to_degrees(pitch_rad) * 10);
 
-    moveWithSpeed(yaw_angle, pitch_angle, speed);
+    moveWithSpeed(yaw_angle, pitch_angle, speed, tag);
 }
 
 bool Motion::isMoving()
@@ -144,7 +160,9 @@ void Motion::setAutoAngleSyncEnabled(bool enabled)
 void Motion::setModifyLock(bool locked)
 {
     if (locked) {
-        _modify_lock_count.fetch_add(1, std::memory_order_acq_rel);
+        uint8_t prev = _modify_lock_count.fetch_add(1, std::memory_order_acq_rel);
+        ESP_LOGI(TAG, "setModifyLock(true) refcount %u->%u t=%u",
+                 (unsigned)prev, (unsigned)(prev + 1), (unsigned)esp_log_timestamp());
     } else {
         uint8_t prev = _modify_lock_count.load(std::memory_order_acquire);
         while (prev > 0) {
@@ -152,10 +170,13 @@ void Motion::setModifyLock(bool locked)
                     prev, prev - 1,
                     std::memory_order_acq_rel,
                     std::memory_order_acquire)) {
+                ESP_LOGI(TAG, "setModifyLock(false) refcount %u->%u t=%u",
+                         (unsigned)prev, (unsigned)(prev - 1), (unsigned)esp_log_timestamp());
                 return;
             }
         }
-        ESP_LOGW(TAG, "setModifyLock(false) underflow — over-release ignored");
+        ESP_LOGW(TAG, "setModifyLock(false) underflow — over-release ignored t=%u",
+                 (unsigned)esp_log_timestamp());
     }
 }
 

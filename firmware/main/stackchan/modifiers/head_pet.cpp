@@ -132,7 +132,7 @@ void HeadPetModifier::restore_original_state(Modifiable& stackchan)
     }
 
     stackchan.avatar().setEmotion(_prev_emotion);
-    stackchan.motion().moveWithSpeed(_prev_yaw, _prev_pitch, 200);
+    stackchan.motion().moveWithSpeed(_prev_yaw, _prev_pitch, 200, "head_pet_restore");
 
     _in_happy_state = false;
 }
@@ -167,7 +167,7 @@ void HeadPetModifier::perform_pet_motion(Modifiable& stackchan)
     target_pitch = uitk::clamp(target_pitch, 0, 540);
     target_yaw   = uitk::clamp(target_yaw, -512, 512);
 
-    motion.moveWithSpeed(target_yaw, target_pitch, speed);
+    motion.moveWithSpeed(target_yaw, target_pitch, speed, "head_pet_perform");
 }
 
 void HeadPetModifier::flashWakeFeedback(Modifiable& stackchan)

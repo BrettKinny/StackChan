@@ -242,7 +242,7 @@ void StateManager::onEnterSleep()
     //    moves both servos to true home (yaw=0, pitch=0) — the same neutral
     //    pose the device boots into. Reads as "Dotty has gone still" rather
     //    than "Dotty is drooping", which is the deliberate feel for sleep.
-    sc.motion().goHome(80);
+    sc.motion().goHome(80, "state_manager_sleep_pose");
     // 4. Defer torque-release until the move settles — _update polls
     //    motion.isMoving() each tick and releases torque the moment it's
     //    safe. Torque-off mid-move would freeze the head wherever it
@@ -264,7 +264,7 @@ void StateManager::onExitSleep()
     //    face_detected), its lookAt will override within a few ticks —
     //    that's the desired feel ("Dotty looks up, then at you").
     Application::GetInstance().SendEvent("sleep_pose", "{\"phase\":\"wake_tilt\"}");
-    sc.motion().moveWithSpeed(0, 70, 80);
+    sc.motion().moveWithSpeed(0, 70, 80, "state_manager_wake_tilt");
     // 3. Release the modify lock so idle_motion (now back on the NORMAL
     //    profile via applyIdleProfile) can resume.
     sc.motion().setModifyLock(false);
@@ -334,7 +334,7 @@ void StateManager::onExitSecurity()
     sc.motion().setModifyLock(false);
     // 3. Return the head to neutral. goHome() rather than a deliberate
     //    moveWithSpeed so the next state takes over from a known pose.
-    sc.motion().goHome(80);
+    sc.motion().goHome(80, "state_manager_security_exit");
     // 4. Restore neutral expression (was latched Angry on entry).
     if (sc.hasAvatar()) {
         sc.avatar().setEmotion(avatar::Emotion::Neutral);
@@ -404,14 +404,14 @@ void StateManager::runSecurityPanLoop()
 
     while (check_running()) {
         // Leg 1 — full left.
-        sc.motion().moveWithSpeed(-500, 0, 50);
+        sc.motion().moveWithSpeed(-500, 0, 50, "state_manager_security_leg1");
         sleep_ms(3000);
         if (!check_running()) break;
         sleep_ms(1000);  // dwell at extreme
         if (!check_running()) break;
 
         // Leg 2 — full right.
-        sc.motion().moveWithSpeed(500, 0, 50);
+        sc.motion().moveWithSpeed(500, 0, 50, "state_manager_security_leg2");
         sleep_ms(3000);
         if (!check_running()) break;
         sleep_ms(1000);  // dwell at extreme
@@ -420,7 +420,7 @@ void StateManager::runSecurityPanLoop()
         // Leg 3 — back to centre, then a longer 4 s pause before repeating
         // gives the cadence its "heads up, scanning" rhythm rather than
         // continuous churn.
-        sc.motion().moveWithSpeed(0, 0, 50);
+        sc.motion().moveWithSpeed(0, 0, 50, "state_manager_security_centre");
         sleep_ms(3000);
         if (!check_running()) break;
         sleep_ms(4000);

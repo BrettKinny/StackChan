@@ -121,7 +121,7 @@ private:
             target_pitch += Random::getInstance().getInt(-20, 20);
         }
 
-        motion.moveWithSpeed(target_yaw, target_pitch, speed);
+        motion.moveWithSpeed(target_yaw, target_pitch, speed, "speaking");
     }
 
     // 配置常量

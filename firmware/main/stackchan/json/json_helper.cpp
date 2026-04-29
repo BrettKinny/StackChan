@@ -88,7 +88,7 @@ static void update_servo(Servo& servo, ArduinoJson::JsonObject& jsonObject)
     // If has speed, move directly
     if (jsonObject["speed"].is<int>()) {
         int speed = jsonObject["speed"];
-        servo.moveWithSpeed(angle, speed);
+        servo.moveWithSpeed(angle, speed, "json_helper");
         return;
     }
 
