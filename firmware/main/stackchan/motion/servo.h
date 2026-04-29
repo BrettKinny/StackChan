@@ -51,8 +51,12 @@ public:
      *
      * @param angle
      * @param speed (0-1000)
+     * @param tag instrumentation label naming the writer (HEADMOVE log).
+     *            Provided so callers that bypass `Motion` (e.g. MCP
+     *            `set_head_angles`, animation keyframes, `json_helper`,
+     *            display-side poses) still get tagged in the trace log.
      */
-    void moveWithSpeed(int angle, int speed);
+    void moveWithSpeed(int angle, int speed, const char* tag = "unknown");
 
     /**
      * @brief Rotate servo with given velocity

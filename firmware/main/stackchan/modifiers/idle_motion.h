@@ -259,13 +259,13 @@ private:
             int target_yaw   = uitk::clamp(current.x + diff_yaw, -800, 800);
             int target_pitch = uitk::clamp(current.y + diff_pitch, 0, 600);
             int speed        = Random::getInstance().getInt(100, 250);
-            motion.moveWithSpeed(target_yaw, target_pitch, speed);
+            motion.moveWithSpeed(target_yaw, target_pitch, speed, "idle_motion_overlay");
         } else {
             // Return-to-center: yaw → 0, gentle pitch shift. Face_tracking
             // will pull back to the locked face on the next detection tick.
             int target_pitch = Random::getInstance().getInt(50, 400);
             int speed        = Random::getInstance().getInt(100, 300);
-            motion.moveWithSpeed(0, target_pitch, speed);
+            motion.moveWithSpeed(0, target_pitch, speed, "idle_motion_overlay");
         }
     }
 
@@ -319,7 +319,7 @@ private:
             int target_yaw   = uitk::clamp(current.x + diff_yaw, -800, 800);
             int target_pitch = uitk::clamp(current.y + diff_pitch, 0, 600);
             int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
-            motion.moveWithSpeed(target_yaw, target_pitch, speed);
+            motion.moveWithSpeed(target_yaw, target_pitch, speed, "idle_motion_small_offset");
         } else if (action < 85) {
             // Action B: gentle look — moderate yaw target with profile-bounded
             // pitch baseline. The pitch baseline is what gives SLEEPY its
@@ -328,14 +328,14 @@ private:
             int target_yaw   = Random::getInstance().getInt(-p.gentle_yaw_range, p.gentle_yaw_range);
             int target_pitch = Random::getInstance().getInt(p.pitch_baseline_min, p.pitch_baseline_max);
             int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
-            motion.moveWithSpeed(target_yaw, target_pitch, speed);
+            motion.moveWithSpeed(target_yaw, target_pitch, speed, "idle_motion_gentle_look");
         } else {
             // Action C: return to centre. Yaw to 0, pitch to baseline. Resets
             // accumulated drift so Dotty doesn't end up locked in one quadrant
             // after enough small-offset ticks.
             int target_pitch = Random::getInstance().getInt(p.pitch_baseline_min, p.pitch_baseline_max);
             int speed        = Random::getInstance().getInt(p.speed_min, p.speed_max);
-            motion.moveWithSpeed(0, target_pitch, speed);
+            motion.moveWithSpeed(0, target_pitch, speed, "idle_motion_return_center");
         }
     }
 

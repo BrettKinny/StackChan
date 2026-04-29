@@ -432,7 +432,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
         // Return to default pose
         auto& motion = GetStackChan().motion();
-        motion.pitchServo().moveWithSpeed(0, 80);
+        motion.pitchServo().moveWithSpeed(0, 80, "stackchan_display_pose_default");
 
     } else if (strcmp(emotion, "thinking") == 0) {
         if (speaking_modifier_id_ >= 0) {
