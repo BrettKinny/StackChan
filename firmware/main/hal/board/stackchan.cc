@@ -68,14 +68,17 @@ public:
             ESP_LOGI(TAG, "Set charge current success");
         }
 
-        // Enable PKEY long-press IRQ (reg 0x42 bit 2). Reg 0x27 keeps default
-        // 0x00 → IRQ fires at 1s, AXP hardware-off at 4s, leaving ~3s for
+        // Enable PKEY long-press IRQ. Per XPowersLib AXP2101 enum, PKEY events
+        // pack into bits 8-11 of a 24-bit IRQ value, i.e. byte 1 — registers
+        // INTEN2 (0x41) / INTSTS2 (0x49). Long-press is bit 2 of that byte.
+        // Reg 0x27 left at default 0x00 → bits[5:4]=0 (IRQ at 1s),
+        // bits[3:2]=0 (AXP hardware-off at 4s), giving ~3s of headroom for
         // firmware cleanup before the chip self-cuts the rail.
-        uint8_t irq_en_3 = ReadReg(0x42);
-        WriteReg(0x42, irq_en_3 | 0x04);
+        uint8_t irq_en_2 = ReadReg(0x41);
+        WriteReg(0x41, irq_en_2 | 0x04);
         // Clear any stale PKEY status so a freshly-booted board doesn't see a
         // ghost long-press from the boot button hold itself.
-        WriteReg(0x4A, 0xFF);
+        WriteReg(0x49, 0xFF);
 
         SetBrightness(0);
     }
@@ -84,9 +87,9 @@ public:
     // (W1C) so subsequent polls only fire on new presses.
     bool ConsumePekLongPress()
     {
-        uint8_t status = ReadReg(0x4A);
+        uint8_t status = ReadReg(0x49);
         if (status & 0x04) {
-            WriteReg(0x4A, 0x04);
+            WriteReg(0x49, 0x04);
             return true;
         }
         return false;
