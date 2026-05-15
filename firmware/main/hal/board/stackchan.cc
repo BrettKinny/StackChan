@@ -95,6 +95,16 @@ public:
         return false;
     }
 
+    bool IsExternalPowerConnected()
+    {
+        const uint8_t power_status      = ReadReg(0x01);
+        const uint8_t current_direction = (power_status & 0b01100000) >> 5;
+        const bool is_charging_done     = (power_status & 0b00000111) == 0b00000100;
+        // Treat any non-discharging state as externally powered so a plugged-in
+        // cable still counts even after the battery is full.
+        return current_direction != 2 || is_charging_done;
+    }
+
     void SetBrightness(uint8_t brightness)
     {
         if (brightness == 0) {
