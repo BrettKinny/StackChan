@@ -223,8 +223,17 @@ public:
         uint8_t reg = 0x02;
         esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, read_buffer_, 6, 100);
         if (err != ESP_OK) {
+            consecutive_failures_++;
+            const int64_t now_us = esp_timer_get_time();
+            if (last_error_log_us_ == 0 || (now_us - last_error_log_us_) >= 1'000'000) {
+                ESP_LOGW(TAG, "FT6336 read failed (%s), skipped %lu sample(s)",
+                         esp_err_to_name(err),
+                         static_cast<unsigned long>(consecutive_failures_));
+                last_error_log_us_ = now_us;
+            }
             return;
         }
+        consecutive_failures_ = 0;
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x   = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
         tp_.y   = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
@@ -236,8 +245,10 @@ public:
     }
 
 private:
-    uint8_t* read_buffer_ = nullptr;
+    uint8_t* read_buffer_          = nullptr;
     TouchPoint_t tp_;
+    int64_t last_error_log_us_     = 0;
+    uint32_t consecutive_failures_ = 0;
 };
 
 class M5StackCoreS3Board : public WifiBoard {
