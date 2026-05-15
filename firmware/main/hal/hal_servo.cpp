@@ -180,7 +180,7 @@ void Hal::servo_init()
     ServoConfig_t pitch_servo_config;
     pitch_servo_config.id                     = 2;
     pitch_servo_config.defaultZeroPos         = 620;
-    pitch_servo_config.angleLimit             = Vector2i(0, 900);
+    pitch_servo_config.angleLimit             = Vector2i(30, 870);
     pitch_servo_config.rawPosLimit            = Vector2i(0, 1000);
     pitch_servo_config.settingNs              = "servo";
     pitch_servo_config.settingZeroPositionKey = "zero_pos_2";
