@@ -91,6 +91,15 @@ public:
     bool kidMode() const { return _kid_mode; }
     bool smartMode() const { return _smart_mode; }
 
+    // Re-fire the current state as a fresh "state_changed" edge for
+    // consumers that lost track across a reconnect (issue #21). The
+    // server-side perception store is in-memory, so a dotty-behaviour /
+    // xiaozhi-server restart or a network drop re-initialises it to IDLE;
+    // firmware never re-emits on its own because nothing *changed*. Called
+    // from Application's OnAudioChannelOpened so every (re)connect re-syncs.
+    // Idempotent on the consumer side (level-set), so safe on every open.
+    void reemitState() { emitStateChanged(); }
+
     static const char* stateName(State s);
     static bool parseState(const char* s, State& out);
 

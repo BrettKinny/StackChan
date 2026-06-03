@@ -1,8 +1,18 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..94cd19e 100644
+index d69d43d..652f4db 100644
 --- c/main/application.cc
 +++ w/main/application.cc
-@@ -249,11 +249,29 @@ void Application::Run() {
+@@ -9,6 +9,9 @@
+ #include "mcp_server.h"
+ #include "assets.h"
+ #include "settings.h"
++#include <stackchan/sound_localizer.h>
++#include <stackchan/stackchan.h>
++#include <stackchan/modes/state_manager.h>
+ 
+ #include <cstring>
+ #include <esp_log.h>
+@@ -249,11 +252,29 @@ void Application::Run() {
              clock_ticks_++;
              auto display = Board::GetInstance().GetDisplay();
              display->UpdateStatusBar();
@@ -33,7 +43,24 @@ index d69d43d..94cd19e 100644
          }
      }
  }
-@@ -526,7 +544,6 @@ void Application::InitializeProtocol() {
+@@ -507,6 +528,16 @@ void Application::InitializeProtocol() {
+             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
+                 protocol_->server_sample_rate(), codec->output_sample_rate());
+         }
++        // Dotty (issue #21): re-fire current state on every channel open so
++        // the server-side perception store re-syncs after a restart / network
++        // drop that re-initialised it to IDLE. StateManager owns the truth;
++        // reach it through the modifier pool (same idiom as face_tracking.cpp).
++        Schedule([this]() {
++            if (auto* sm = static_cast<stackchan::StateManager*>(
++                    GetStackChan().getModifierByName(stackchan::StateManager::kName))) {
++                sm->reemitState();
++            }
++        });
+     });
+     
+     protocol_->OnAudioChannelClosed([this, &board]() {
+@@ -526,7 +557,6 @@ void Application::InitializeProtocol() {
              if (strcmp(state->valuestring, "start") == 0) {
                  Schedule([this]() {
                      aborted_ = false;
@@ -41,7 +68,7 @@ index d69d43d..94cd19e 100644
                  });
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
-@@ -542,7 +559,10 @@ void Application::InitializeProtocol() {
+@@ -542,7 +572,10 @@ void Application::InitializeProtocol() {
                  auto text = cJSON_GetObjectItem(root, "text");
                  if (cJSON_IsString(text)) {
                      ESP_LOGI(TAG, "<< %s", text->valuestring);
@@ -53,7 +80,7 @@ index d69d43d..94cd19e 100644
                          display->SetChatMessage("assistant", message.c_str());
                      });
                  }
-@@ -553,10 +573,12 @@ void Application::InitializeProtocol() {
+@@ -553,10 +586,12 @@ void Application::InitializeProtocol() {
                  ESP_LOGI(TAG, ">> %s", text->valuestring);
                  Schedule([display, message = std::string(text->valuestring)]() {
                      display->SetChatMessage("user", message.c_str());
@@ -66,7 +93,7 @@ index d69d43d..94cd19e 100644
              if (cJSON_IsString(emotion)) {
                  Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                      display->SetEmotion(emotion_str.c_str());
-@@ -610,33 +632,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +645,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -128,7 +155,7 @@ index d69d43d..94cd19e 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -711,13 +736,23 @@ void Application::HandleToggleChatEvent() {
+@@ -711,13 +749,23 @@ void Application::HandleToggleChatEvent() {
  }
  
  void Application::ContinueOpenAudioChannel(ListeningMode mode) {
@@ -154,7 +181,97 @@ index d69d43d..94cd19e 100644
              return;
          }
      }
-@@ -1075,6 +1110,28 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -782,6 +830,22 @@ void Application::HandleWakeWordDetectedEvent() {
+     auto wake_word = audio_service_.GetLastWakeWord();
+     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+ 
++    // Emit a perception bus event with the dominant sound direction over
++    // the last ~1.5 s — that window covers the wake-word phrase itself
++    // (~700 ms) plus the user's lead-in. Server-side consumer
++    // (_perception_wake_word_turner in bridge.py) decides whether to
++    // turn the head; firmware emits unconditionally regardless of state.
++    {
++        auto dir = stackchan::SoundLocalizer::Instance().GetRecentDirection(/*window_us=*/1500000);
++        char data_json[160];
++        int len = snprintf(data_json, sizeof(data_json),
++            "{\"phrase\":\"%s\",\"direction\":\"%s\",\"balance\":%.3f,\"energy\":%.0f,\"state\":%d}",
++            wake_word.c_str(), dir.direction, dir.balance, dir.energy, (int)state);
++        if (len > 0 && len < (int)sizeof(data_json)) {
++            SendEvent("wake_word_detected", data_json);
++        }
++    }
++
+     if (state == kDeviceStateIdle) {
+         audio_service_.EncodeWakeWord();
+         auto wake_word = audio_service_.GetLastWakeWord();
+@@ -861,21 +925,43 @@ void Application::HandleStateChangedEvent() {
+     auto led = board.GetLed();
+     led->OnStateChanged();
+     
++    // Dotty privacy gate: while engaged (SLEEP), StateManager owns the
++    // avatar (Sleepy + Zzz) and the listening LED. Skip xiaozhi's
++    // display-driven side effects so they don't overwrite that state.
++    // Audio-side disables still run for IDLE so we stay mic-off.
++    const bool gated = privacy_gate_;
++
+     switch (new_state) {
+         case kDeviceStateUnknown:
+         case kDeviceStateIdle:
++            audio_service_.EnableVoiceProcessing(false);
++            if (gated) {
++                // No display reset, no wake-word arm. StateManager keeps
++                // the avatar Sleepy and the LED off.
++                break;
++            }
+             display->SetStatus(Lang::Strings::STANDBY);
+             display->ClearChatMessages();  // Clear messages first
+             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+-            audio_service_.EnableVoiceProcessing(false);
+             audio_service_.EnableWakeWordDetection(true);
+             break;
+         case kDeviceStateConnecting:
++            if (gated) {
++                break;
++            }
+             display->SetStatus(Lang::Strings::CONNECTING);
+             display->SetEmotion("neutral");
+             display->SetChatMessage("system", "");
+             break;
+         case kDeviceStateListening:
++            // Dotty privacy gate: defense-in-depth — SetPrivacyGate forces
++            // Idle, but a race could land us here. Skip the entire LISTENING
++            // entry (SetStatus would paint the listening pixel red and
++            // SetEmotion would overwrite Sleepy) so the StateManager's
++            // sleep state is preserved.
++            if (gated) {
++                break;
++            }
+             display->SetStatus(Lang::Strings::LISTENING);
+             display->SetEmotion("neutral");
+ 
+@@ -886,7 +972,7 @@ void Application::HandleStateChangedEvent() {
+                 if (listening_mode_ == kListeningModeAutoStop) {
+                     audio_service_.WaitForPlaybackQueueEmpty();
+                 }
+-                
++
+                 // Send the start listening command
+                 protocol_->SendStartListening(listening_mode_);
+                 audio_service_.EnableVoiceProcessing(true);
+@@ -907,6 +993,12 @@ void Application::HandleStateChangedEvent() {
+             }
+             break;
+         case kDeviceStateSpeaking:
++            // Dotty privacy gate: skip display + audio entry. The
++            // SpeakingModifier the display would add animates the avatar
++            // mouth, which would conflict with the Sleepy face.
++            if (gated) {
++                break;
++            }
+             display->SetStatus(Lang::Strings::SPEAKING);
+ 
+             if (listening_mode_ != kListeningModeRealtime) {
+@@ -1075,6 +1167,63 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -180,14 +297,49 @@ index d69d43d..94cd19e 100644
 +    });
 +}
 +
++void Application::SetPrivacyGate(bool on) {
++    // Dotty privacy gate. Toggled by stackchan StateManager on enter/exit
++    // of SLEEP. When on:
++    //   - wake-word detection + voice processing forced off
++    //   - HandleStateChangedEvent stops re-arming them on subsequent
++    //     transitions through Idle / Listening (see the gate checks in
++    //     the kDeviceStateIdle and kDeviceStateListening cases)
++    //   - device state forced to Idle so any in-flight LISTENING/SPEAKING
++    //     is unwound through the normal state-change plumbing — display
++    //     status flips to STANDBY, which clears the listening LED via
++    //     stackchan_display::set_listening_pixel.
++    // When off: gate clears, and the next Idle transition re-arms wake-word
++    // through the normal kDeviceStateIdle path.
++    if (privacy_gate_ == on) return;
++    privacy_gate_ = on;
++    ESP_LOGI(TAG, "Privacy gate %s", on ? "engaged" : "lifted");
++    Schedule([this, on]() {
++        if (on) {
++            audio_service_.EnableVoiceProcessing(false);
++            audio_service_.EnableWakeWordDetection(false);
++            // Force out of any in-flight LISTENING/SPEAKING. If already
++            // Idle this is a no-op via state_machine_.TransitionTo's
++            // identity check.
++            SetDeviceState(kDeviceStateIdle);
++        } else {
++            // Re-arm only if we're idle — other states have their own
++            // entry-side audio setup, which the gate will no longer
++            // intercept.
++            if (state_machine_.GetState() == kDeviceStateIdle) {
++                audio_service_.EnableWakeWordDetection(true);
++            }
++        }
++    });
++}
++
  void Application::SetAecMode(AecMode mode) {
      aec_mode_ = mode;
      Schedule([this]() {
 diff --git c/main/application.h w/main/application.h
-index 7ca7af4..ecac53a 100644
+index 7ca7af4..de144a3 100644
 --- c/main/application.h
 +++ w/main/application.h
-@@ -108,6 +108,9 @@ public:
+@@ -108,8 +108,21 @@ public:
      bool UpgradeFirmware(const std::string& url, const std::string& version = "");
      bool CanEnterSleepMode();
      void SendMcpMessage(const std::string& payload);
@@ -196,7 +348,27 @@ index 7ca7af4..ecac53a 100644
 +    void SendEvent(const std::string& name, const std::string& data_json);
      void SetAecMode(AecMode mode);
      AecMode GetAecMode() const { return aec_mode_; }
++
++    // Dotty: privacy gate. When true, wake-word detection and voice
++    // processing are forced off and pinned across HandleStateChangedEvent
++    // re-enables (kDeviceStateIdle normally arms wake-word; kDeviceStateListening
++    // normally arms voice processing). Setting the gate also forces an
++    // immediate transition to kDeviceStateIdle so any in-flight LISTENING/
++    // SPEAKING is cleared (the listening LED follows via display->SetStatus).
++    // Owner: stackchan StateManager (toggled on enter/exit of SLEEP).
++    void SetPrivacyGate(bool on);
++    bool GetPrivacyGate() const { return privacy_gate_; }
      void PlaySound(const std::string_view& sound);
+     AudioService& GetAudioService() { return audio_service_; }
+     
+@@ -140,6 +153,7 @@ private:
+     bool aborted_ = false;
+     bool assets_version_checked_ = false;
+     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
++    bool privacy_gate_ = false;  // Dotty: when true, HandleStateChangedEvent skips re-arming wake-word / voice processing
+     int clock_ticks_ = 0;
+     TaskHandle_t activation_task_handle_ = nullptr;
+ 
 diff --git c/main/assets.cc w/main/assets.cc
 index ad61944..6b84daf 100644
 --- c/main/assets.cc
@@ -503,8 +675,46 @@ index 8fc5fef..f0f3a42 100644
              // Close encoder
              esp_opus_enc_close(encoder_handle);
              auto end_time = esp_timer_get_time();
+diff --git c/main/boards/common/i2c_device.cc w/main/boards/common/i2c_device.cc
+index 835997d..1061416 100644
+--- c/main/boards/common/i2c_device.cc
++++ w/main/boards/common/i2c_device.cc
+@@ -21,15 +21,29 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr) {
+ 
+ void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
+     uint8_t buffer[2] = {reg, value};
+-    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
++    esp_err_t err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "WriteReg failed reg=0x%02X val=0x%02X err=%s",
++                 reg, value, esp_err_to_name(err));
++    }
+ }
+ 
+ uint8_t I2cDevice::ReadReg(uint8_t reg) {
+     uint8_t buffer[1];
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100));
++    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "ReadReg failed reg=0x%02X err=%s",
++                 reg, esp_err_to_name(err));
++        return 0xFF;
++    }
+     return buffer[0];
+ }
+ 
+ void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
++    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "ReadRegs failed reg=0x%02X len=%u err=%s",
++                 reg, (unsigned)length, esp_err_to_name(err));
++        // Buffer left untouched; caller must not assume valid contents.
++    }
+ }
+\ No newline at end of file
 diff --git c/main/mcp_server.cc w/main/mcp_server.cc
-index 7cd7ba0..09733d8 100644
+index 7cd7ba0..8f6ca17 100644
 --- c/main/mcp_server.cc
 +++ w/main/mcp_server.cc
 @@ -13,6 +13,7 @@
@@ -515,13 +725,11 @@ index 7cd7ba0..09733d8 100644
  #include "board.h"
  #include "settings.h"
  #include "lvgl_theme.h"
-@@ -109,7 +110,8 @@ void McpServer::AddCommonTools() {
+@@ -109,7 +110,6 @@ void McpServer::AddCommonTools() {
                  Property("question", kPropertyTypeString)
              }),
              [camera](const PropertyList& properties) -> ReturnValue {
 -                // Lower the priority to do the camera capture
-+                GetHAL().setCameraLedActive(true, 10000);
-+
                  TaskPriorityReset priority_reset(1);
  
                  if (!camera->Capture()) {
@@ -591,40 +799,3 @@ index f0cc034..34739af 100644
                  if (strcmp(type->valuestring, "hello") == 0) {
                      ParseServerHello(root);
                  } else {
-diff --git c/main/boards/common/i2c_device.cc w/main/boards/common/i2c_device.cc
-index 835997d..1061416 100644
---- c/main/boards/common/i2c_device.cc
-+++ w/main/boards/common/i2c_device.cc
-@@ -21,15 +21,29 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr) {
- 
- void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
-     uint8_t buffer[2] = {reg, value};
--    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
-+    esp_err_t err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
-+    if (err != ESP_OK) {
-+        ESP_LOGW(TAG, "WriteReg failed reg=0x%02X val=0x%02X err=%s",
-+                 reg, value, esp_err_to_name(err));
-+    }
- }
- 
- uint8_t I2cDevice::ReadReg(uint8_t reg) {
-     uint8_t buffer[1];
--    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100));
-+    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100);
-+    if (err != ESP_OK) {
-+        ESP_LOGW(TAG, "ReadReg failed reg=0x%02X err=%s",
-+                 reg, esp_err_to_name(err));
-+        return 0xFF;
-+    }
-     return buffer[0];
- }
- 
- void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
--    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
-+    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
-+    if (err != ESP_OK) {
-+        ESP_LOGW(TAG, "ReadRegs failed reg=0x%02X len=%u err=%s",
-+                 reg, (unsigned)length, esp_err_to_name(err));
-+        // Buffer left untouched; caller must not assume valid contents.
-+    }
- }
