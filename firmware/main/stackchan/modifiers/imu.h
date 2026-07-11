@@ -57,6 +57,7 @@ public:
             auto& motion = stackchan.motion();
             if (!motion.isModifyLocked()) {
                 motion.setModifyLock(true);
+                _motion_lock_held = true;
                 motion.goHome(300, "imu_shake_react");
             }
 
@@ -114,7 +115,10 @@ private:
         _shy_decorator_id   = -1;
 
         auto& motion = stackchan.motion();
-        motion.setModifyLock(false);
+        if (_motion_lock_held) {
+            motion.setModifyLock(false);
+            _motion_lock_held = false;
+        }
 
         _is_reacting = false;
     }
@@ -125,6 +129,10 @@ private:
 
     // 状态控制
     bool _is_reacting          = false;
+    // True only when this modifier acquired one motion-lock reference. A
+    // shake that overlaps dance/security observes their existing lock and
+    // must not release that owner's reference when the reaction ends.
+    bool _motion_lock_held     = false;
     bool _toggle_phase         = false;
     uint32_t _restore_at       = 0;
     uint32_t _next_toggle_tick = 0;

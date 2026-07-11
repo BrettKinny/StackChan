@@ -166,10 +166,9 @@ private:
     static void securityPanTaskEntry(void* arg);
     void runSecurityPanLoop();
 
-    // Dance mode — instantiate a DanceModifier on entry so the keyframe
-    // sequence drives the head and the left ring's animation. The modifier
-    // self-destroys when the timeline finishes; onExitDance() forces removal
-    // if the user transitions out of DANCE before the choreography ends.
+    // Dance mode — the xiaozhi server owns named/song-length choreography.
+    // Firmware holds the cooperative motion lock for the state's lifetime so
+    // face_tracking and idle_motion cannot overwrite server MCP keyframes.
     void onEnterDance();
     void onExitDance();
 
@@ -204,11 +203,6 @@ private:
     std::atomic<bool> _security_running{false};
     SemaphoreHandle_t _security_stop_sem    = nullptr;
 
-    // Pool id of the active DanceModifier, or -1 if no dance is in flight.
-    // The modifier self-destroys when its timeline finishes; the id then
-    // points at a free pool slot, which removeModifier handles as a benign
-    // no-op. A fresh entry to DANCE overwrites it with a new id.
-    int _dance_modifier_id = -1;
 };
 
 }  // namespace stackchan

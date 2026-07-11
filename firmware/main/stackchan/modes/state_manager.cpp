@@ -7,7 +7,6 @@
 #include "../stackchan.h"
 #include "../face/face_detector.h"
 #include "../modifiers/idle_motion.h"
-#include "../modifiers/dance.h"
 #include "../avatar/avatar/elements/emotion.h"
 #include "application.h"
 #include <hal/hal.h>
@@ -392,26 +391,18 @@ void StateManager::onExitSecurity()
 
 void StateManager::onEnterDance()
 {
-    // Pick the Happy sequence as the default — short (~4 s), clearly
-    // dance-y (sway + happy eyes + open mouth). The other sequences in
-    // dance.h (Robot, Panic, LookAround) are reserved for voice-driven or
-    // bridge-driven choreography that wants a specific feel.
-    auto modifier = std::make_unique<DanceModifier>(DanceModifier::Happy);
-    _dance_modifier_id = ::GetStackChan().addModifier(std::move(modifier));
-    mclog::tagInfo(_tag, "dance: choreography started (modifier id={})",
-                   _dance_modifier_id);
+    // The server owns named, song-length choreography and sends servo/LED
+    // keyframes through MCP. Hold the cooperative lock for the full dance so
+    // face_tracking and idle_motion cannot overwrite those commands. MCP
+    // servo writes intentionally bypass this modifier-level lock.
+    ::GetStackChan().motion().setModifyLock(true);
+    mclog::tagInfo(_tag, "dance: server choreography ownership acquired");
 }
 
 void StateManager::onExitDance()
 {
-    // Tear down the timeline if it's still running. removeModifier is a
-    // benign no-op if the slot has already been freed by the modifier's own
-    // requestDestroy() (timeline finished naturally), so we always call it.
-    if (_dance_modifier_id >= 0) {
-        ::GetStackChan().removeModifier(_dance_modifier_id);
-        _dance_modifier_id = -1;
-    }
-    mclog::tagInfo(_tag, "dance: choreography stopped");
+    ::GetStackChan().motion().setModifyLock(false);
+    mclog::tagInfo(_tag, "dance: server choreography ownership released");
 }
 
 void StateManager::securityPanTaskEntry(void* arg)
