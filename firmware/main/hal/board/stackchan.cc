@@ -87,7 +87,12 @@ public:
     // (W1C) so subsequent polls only fire on new presses.
     bool ConsumePekLongPress()
     {
-        uint8_t status = ReadReg(0x49);
+        // ReadReg() returns 0xFF on I2C failure, which would look like every
+        // IRQ bit is set and falsely trigger a shutdown. ReadRegs() leaves the
+        // caller-provided buffer untouched on failure, so initialise it to a
+        // safe value and fail closed when the PMIC cannot be read.
+        uint8_t status = 0;
+        ReadRegs(0x49, &status, 1);
         if (status & 0x04) {
             WriteReg(0x49, 0x04);
             return true;
