@@ -23,3 +23,20 @@ failure. It needs the fetched managed component, a host C++ compiler, and
 the firmware build and physical A/V tests remain required.
 
 AI-assisted implementation and documentation: GPT-6 (OpenAI).
+
+## Camera ownership regression
+
+`python firmware/tests/test_camera_upload_ownership.py` compiles the actual
+camera upload method with fake camera/HTTP/FreeRTOS boundaries. Add
+`--source-ref ed4161e` to reproduce the earlier double-join and outstanding
+queue: the controlled scheduler completes encoding, lets the face detector's
+actual join prelude join first, then resumes the uploader's second join.
+This deliberately models the observed IDF `EINVAL` result without relying on
+undefined concurrent joins in the host C++ runtime.
+
+The fix encodes into one owned PSRAM JPEG under the camera arbiter and releases
+the arbiter before HTTP operations. It needs neither a shared encoder thread
+nor a queue. Tests assert ownership release after encoding, connection, write,
+HTTP-status and arbiter failures, and successful retry. Physical warm-camera
+repetition and the main-task stack watermark remain necessary acceptance checks;
+this does not remove synchronous HTTP timeout stalls.
