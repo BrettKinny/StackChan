@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <esp_heap_caps.h>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 
 #include "esp_imgfx_color_convert.h"
@@ -1262,9 +1263,13 @@ std::string StackChanCamera::StreamJpegToBridge(
     }
     http->Write("", 0);
 
-    if (http->GetStatusCode() != 200) {
-        ESP_LOGE(TAG, "Bridge upload failed, status=%d url=%s",
-                 http->GetStatusCode(), url.c_str());
+    const auto response_wait_started = std::chrono::steady_clock::now();
+    const int status = http->GetStatusCode();
+    if (status != 200) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - response_wait_started).count();
+        ESP_LOGE(TAG, "Bridge upload failed, status=%d network_error=%d wait_ms=%d url=%s",
+                 status, http->GetLastError(), static_cast<int>(elapsed_ms), url.c_str());
         throw std::runtime_error("Failed to upload to bridge");
     }
 
@@ -1277,4 +1282,3 @@ std::string StackChanCamera::StreamJpegToBridge(
              (int)remain_stack_size, result.c_str());
     return result;
 }
-

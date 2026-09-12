@@ -10,3 +10,6 @@ add_compile_options(-Wno-missing-field-initializers)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
+
+# IDF resolves managed dependencies during project(); patch only a build copy.
+include(cmake/patch_esp_ml307.cmake)
