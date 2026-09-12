@@ -220,6 +220,16 @@ void StateManager::onVoiceListening()
     }
 }
 
+void StateManager::onVoiceSpeaking()
+{
+    // A proactive/admin reply can start before any LISTENING edge. Claim
+    // TALK for the entire reply so ambient consumers yield to conversation.
+    // Keep the listening LED separate and never wake privacy SLEEP here.
+    if (_state == State::IDLE) {
+        setState(State::TALK);
+    }
+}
+
 void StateManager::onVoiceStandby()
 {
     // xiaozhi returned to STANDBY — no chat in flight. Drop back to IDLE

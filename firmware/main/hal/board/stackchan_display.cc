@@ -715,6 +715,12 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         esp_timer_stop(bubble_clear_timer_);
 
         set_listening_pixel(false);
+        // First speech from idle has no listening-boolean edge. Publish
+        // conversation ownership through the existing high-level state.
+        if (auto* sm = static_cast<stackchan::StateManager*>(
+                stackchan.getModifierByName(stackchan::StateManager::kName))) {
+            sm->onVoiceSpeaking();
+        }
     } else {
         avatar.setSpeech(status);
     }

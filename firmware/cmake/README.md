@@ -51,3 +51,17 @@ has an open channel. Closed-channel wake, cancellation after Speaking or privacy
 Sleep, and Sleep arriving during network open are also covered. Sleep remains
 mic-off; the repair does not introduce a voice-wake route from privacy Sleep.
 The test does not emulate FreeRTOS event dispatch or the physical wake model.
+
+## First speech from idle owns Talk
+
+`python firmware/tests/test_voice_speaking_state.py` compiles the real SPEAKING
+display branch, state hooks, transition/event emission and mode tick against
+hardware fakes. `--source-ref 3140f03` reproduces the missing Idle-to-Talk edge.
+The tests cover first speech, two minutes of ticks, listening LED off during
+speech, normal listening/standby recovery, and unchanged sticky/privacy modes.
+
+The new speaking hook does not alter the existing explicit `onFaceLost()`
+Talk-to-Idle transition. A genuine face-lost edge can therefore still relinquish
+Talk during speech; this remains an independent ownership-policy limitation,
+not silently changed by the first-speech repair. Physical A/V acceptance and
+server observation of `state_changed` remain required.
