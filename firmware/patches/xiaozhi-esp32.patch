@@ -1,5 +1,5 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..652f4db 100644
+index d69d43d..59dfe75 100644
 --- c/main/application.cc
 +++ w/main/application.cc
 @@ -9,6 +9,9 @@
@@ -181,6 +181,12 @@ index d69d43d..652f4db 100644
              return;
          }
      }
+@@ -776,4 +824,4 @@ void Application::HandleStopListeningEvent() {
+ void Application::HandleWakeWordDetectedEvent() {
+-    if (!protocol_) {
++    if (!protocol_ || privacy_gate_) {
+         return;
+     }
 @@ -782,6 +830,22 @@ void Application::HandleWakeWordDetectedEvent() {
      auto wake_word = audio_service_.GetLastWakeWord();
      ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
@@ -204,7 +210,46 @@ index d69d43d..652f4db 100644
      if (state == kDeviceStateIdle) {
          audio_service_.EncodeWakeWord();
          auto wake_word = audio_service_.GetLastWakeWord();
-@@ -861,21 +925,43 @@ void Application::HandleStateChangedEvent() {
+@@ -820,18 +884,32 @@ void Application::HandleWakeWordDetectedEvent() {
+ }
+-
++
+ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+-    // Check state again in case it was changed during scheduling
+-    if (GetDeviceState() != kDeviceStateConnecting) {
++    // A healthy ambient channel takes the direct Idle path; a closed
++    // channel takes the scheduled Connecting path. Reject stale work and
++    // privacy sleep in both cases before touching audio.
++    const auto can_continue = [this]() {
++        const auto state = GetDeviceState();
++        return !privacy_gate_ &&
++            (state == kDeviceStateIdle || state == kDeviceStateConnecting);
++    };
++    if (!protocol_ || !can_continue()) {
+         return;
+     }
+-
++
+     if (!protocol_->IsAudioChannelOpened()) {
+         if (!protocol_->OpenAudioChannel()) {
+-            audio_service_.EnableWakeWordDetection(true);
++            if (can_continue()) {
++                audio_service_.EnableWakeWordDetection(true);
++            }
+             return;
+         }
+     }
+-
++
++    // Network open can block while another task engages privacy sleep.
++    if (!can_continue()) {
++        return;
++    }
++
+     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+ #if CONFIG_SEND_WAKE_WORD_DATA
+     // Encode and send the wake word data to the server
+@@ -861,21 +939,43 @@ void Application::HandleStateChangedEvent() {
      auto led = board.GetLed();
      led->OnStateChanged();
      
@@ -249,7 +294,7 @@ index d69d43d..652f4db 100644
              display->SetStatus(Lang::Strings::LISTENING);
              display->SetEmotion("neutral");
  
-@@ -886,7 +972,7 @@ void Application::HandleStateChangedEvent() {
+@@ -886,7 +986,7 @@ void Application::HandleStateChangedEvent() {
                  if (listening_mode_ == kListeningModeAutoStop) {
                      audio_service_.WaitForPlaybackQueueEmpty();
                  }
@@ -258,7 +303,7 @@ index d69d43d..652f4db 100644
                  // Send the start listening command
                  protocol_->SendStartListening(listening_mode_);
                  audio_service_.EnableVoiceProcessing(true);
-@@ -907,6 +993,12 @@ void Application::HandleStateChangedEvent() {
+@@ -907,6 +1007,12 @@ void Application::HandleStateChangedEvent() {
              }
              break;
          case kDeviceStateSpeaking:
@@ -271,7 +316,13 @@ index d69d43d..652f4db 100644
              display->SetStatus(Lang::Strings::SPEAKING);
  
              if (listening_mode_ != kListeningModeRealtime) {
-@@ -1075,6 +1167,63 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1019,4 +1125,4 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+ void Application::WakeWordInvoke(const std::string& wake_word) {
+-    if (!protocol_) {
++    if (!protocol_ || privacy_gate_) {
+         return;
+     }
+@@ -1075,6 +1181,63 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -335,6 +386,11 @@ index d69d43d..652f4db 100644
  void Application::SetAecMode(AecMode mode) {
      aec_mode_ = mode;
      Schedule([this]() {
+@@ -1116,4 +1279,3 @@ void Application::ResetProtocol() {
+         protocol_.reset();
+     });
+ }
+-
 diff --git c/main/application.h w/main/application.h
 index 7ca7af4..de144a3 100644
 --- c/main/application.h

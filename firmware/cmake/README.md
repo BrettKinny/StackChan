@@ -40,3 +40,14 @@ nor a queue. Tests assert ownership release after encoding, connection, write,
 HTTP-status and arbiter failures, and successful retry. Physical warm-camera
 repetition and the main-task stack watermark remain necessary acceptance checks;
 this does not remove synchronous HTTP timeout stalls.
+
+## Wake with an ambient-open channel
+
+`python firmware/tests/test_wake_channel_state.py` reconstructs application
+source from upstream `v2.2.4` plus the committed patch, then compiles both real
+wake callers and their continuation against fake audio/transport boundaries.
+`--patch-ref 1b2b0cb` reproduces the previously ignored wake when Idle already
+has an open channel. Closed-channel wake, cancellation after Speaking or privacy
+Sleep, and Sleep arriving during network open are also covered. Sleep remains
+mic-off; the repair does not introduce a voice-wake route from privacy Sleep.
+The test does not emulate FreeRTOS event dispatch or the physical wake model.
