@@ -33,6 +33,7 @@ public:
  void writePips(Modifiable&,uint32_t){++paints;}
  void onExitSecurity(){} void onExitDance(){} void applyIdleProfile(){}
  void onEnterSleep(){} void onExitSleep(){} void onEnterSecurity(){} void onEnterDance(){}
+ void updateSecuritySweep(uint32_t){}  // #166 sequencer: exercised by test_security_sweep.py
 };
 }
 struct FakeStackChan : stackchan::Modifiable {
