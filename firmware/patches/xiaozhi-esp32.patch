@@ -882,10 +882,35 @@ index 99db546..4e0b5dc 100644
      std::unique_ptr<WakeWord> wake_word_;
      std::unique_ptr<AudioDebugger> audio_debugger_;
 diff --git c/main/audio/wake_words/afe_wake_word.cc w/main/audio/wake_words/afe_wake_word.cc
-index 8fc5fef..f0f3a42 100644
+index 8fc5fef..5c0c47e 100644
 --- c/main/audio/wake_words/afe_wake_word.cc
 +++ w/main/audio/wake_words/afe_wake_word.cc
-@@ -162,6 +162,10 @@ void AfeWakeWord::AudioDetectionTask() {
+@@ -79,6 +79,12 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
+     
+     afe_iface_ = esp_afe_handle_from_config(afe_config);
+     afe_data_ = afe_iface_->create_from_config(afe_config);
++    // Dotty (#179): log the effective AFE/WakeNet config once at init.
++    // wakenet_mode, AGC and the linear gain are defaulted inside the closed
++    // esp-sr library, so a bench distance/angle sweep needs this baseline
++    // before any sensitivity is tuned. Diagnostic only; no behaviour change.
++    ESP_LOGI(TAG, "AFE input format %s (mic gain set by codec)", input_format.c_str());
++    afe_config_print(afe_config);
+ 
+     xTaskCreate([](void* arg) {
+         auto this_ = (AfeWakeWord*)arg;
+@@ -150,6 +156,11 @@ void AfeWakeWord::AudioDetectionTask() {
+         StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
+ 
+         if (res->wakeup_state == WAKENET_DETECTED) {
++            // Dotty (#179): input level (dB, pre-AGC, over the WakeNet
++            // window) of each accepted wake, to compare placements.
++            ESP_LOGI(TAG, "WakeNet detected: volume=%.1f dB word=%d model=%d channel=%d",
++                     res->data_volume, res->wake_word_index, res->wakenet_model_index,
++                     res->trigger_channel_id);
+             Stop();
+             last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
+ 
+@@ -162,6 +173,10 @@ void AfeWakeWord::AudioDetectionTask() {
  
  void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
      // store audio data to wake_word_pcm_
@@ -896,7 +921,7 @@ index 8fc5fef..f0f3a42 100644
      wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
      // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
      while (wake_word_pcm_.size() > 2000 / 30) {
-@@ -171,7 +175,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+@@ -171,7 +186,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
  
  void AfeWakeWord::EncodeWakeWordData() {
      const size_t stack_size = 4096 * 6;
@@ -911,7 +936,7 @@ index 8fc5fef..f0f3a42 100644
      if (wake_word_encode_task_stack_ == nullptr) {
          wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
          assert(wake_word_encode_task_stack_ != nullptr);
-@@ -208,8 +218,19 @@ void AfeWakeWord::EncodeWakeWordData() {
+@@ -208,8 +229,19 @@ void AfeWakeWord::EncodeWakeWordData() {
              std::vector<int16_t> in_buffer;
              esp_audio_enc_in_frame_t in = {};
              esp_audio_enc_out_frame_t out = {};
@@ -933,7 +958,7 @@ index 8fc5fef..f0f3a42 100644
                  if (in_buffer.empty()) {
                      in_buffer = std::move(pcm);
                  } else {
-@@ -238,7 +259,9 @@ void AfeWakeWord::EncodeWakeWordData() {
+@@ -238,7 +270,9 @@ void AfeWakeWord::EncodeWakeWordData() {
                      in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
                  }
              }
