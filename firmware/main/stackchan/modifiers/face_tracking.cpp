@@ -267,7 +267,13 @@ void FaceTrackingModifier::_update(Modifiable& stackchan)
                 // GetDeviceState() reflects the device state machine directly,
                 // so the second acquisition while the first session is still
                 // SPEAKING/LISTENING is suppressed at the call site.
-                if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+                //
+                // Dotty (#180): while the voice server is offline (stopped on
+                // purpose by the host), a walk-up is an ambient trigger — it
+                // respects the reconnect backoff instead of opening a doomed
+                // Connecting session on every face edge.
+                if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle &&
+                    Application::GetInstance().AmbientReconnectAllowed()) {
                     Application::GetInstance().WakeWordInvoke("face");
                 }
             }
