@@ -17,7 +17,7 @@ class TestDanceStateOwnership(unittest.TestCase):
             "void StateManager::onExitDance()", 1
         )[0]
         exit_ = CPP.split("void StateManager::onExitDance()", 1)[1].split(
-            "void StateManager::securityPanTaskEntry", 1
+            "void StateManager::applyIdleProfile", 1
         )[0]
         self.assertIn("setModifyLock(true)", enter)
         self.assertIn("setModifyLock(false)", exit_)

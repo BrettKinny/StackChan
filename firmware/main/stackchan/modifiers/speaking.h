@@ -85,7 +85,11 @@ private:
     void perform_subtle_speaking_motion(Modifiable& stackchan)
     {
         auto& motion = stackchan.motion();
-        if (motion.isMoving()) {
+        // Cooperative motion lock (issue #166): SECURITY's sweep, DANCE's
+        // server choreography, camera stills and the face-capture guard all
+        // own the head while they hold it. Head micro-motion yields; the
+        // mouth animation above keeps running.
+        if (motion.isModifyLocked() || motion.isMoving()) {
             return;
         }
 
