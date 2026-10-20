@@ -284,8 +284,11 @@ static void _head_touch_update_task(void* param)
     vTaskDelay(pdMS_TO_TICKS(200));
 
     while (1) {
-        // Read data
-        si12t_read_touch_result(si12t, &touch_result);
+        // Read data. A failed I2C read counts as no touch, so it can never
+        // fake or stretch a pet (it used to reuse the last reading).
+        if (si12t_read_touch_result(si12t, &touch_result) != ESP_OK) {
+            touch_result = 0;
+        }
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
