@@ -26,16 +26,17 @@ enum class TouchState { IDLE, TOUCHED, SWIPING };
 
 // 配置参数
 struct TouchConfig {
-    // Require SI12T_OUTPUT_HIGH — threshold=2 (MID) still let through events
-    // where channel 2 + a neighbour both spiked to MID for ≥150 ms with no one
-    // touching the device. HP-PROBE traces (2026-04-28) caught two such fires
-    // at i=[1,2,2] and i=[0,2,1]. Bumping to 3 demands the firmest reading.
-    uint8_t touch_threshold = 3;
+    // MID for 2 samples (100 ms). HIGH x3 (2026-04-28, after MID noise fires
+    // at i=[1,2,2] and i=[0,2,1]) missed most light pats: on the 2026-10-20
+    // bench, natural fingertip pats lasted 100-210 ms and HIGH x3 caught 4/10,
+    // MID x2 catches 8/10. The same bench saw no readings at any level in
+    // 18 min idle. Watch the HP-PROBE 60 s summaries for spurious presses.
+    uint8_t touch_threshold = 2;
     int16_t swipe_threshold = 40;  // 使用百分比，范围-100到100
     // Consecutive 50 ms samples of `is_touched()` required before we accept
-    // the IDLE→TOUCHED transition. Filters sub-150 ms capacitive blips
-    // (RF/EMI/proximity drift) without making deliberate pets feel laggy.
-    uint8_t debounce_samples = 3;
+    // the IDLE→TOUCHED transition. Filters single-sample capacitive blips
+    // (RF/EMI/proximity drift) without missing short pats.
+    uint8_t debounce_samples = 2;
 };
 
 // 触摸数据
