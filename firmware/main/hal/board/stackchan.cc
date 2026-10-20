@@ -128,9 +128,12 @@ public:
     void SetBrightness(uint8_t brightness)
     {
         if (brightness == 0) {
-            // DLDO1 off
-            uint8_t val = ReadReg(0x90);
-            WriteReg(0x90, val & 0x7F);
+            // DLDO1 off. Skip on a failed read: writing back 0xFF & 0x7F
+            // would switch on every other LDO/DLDO rail in 0x90.
+            uint8_t val = 0;
+            if (TryReadReg(0x90, val)) {
+                WriteReg(0x90, val & 0x7F);
+            }
         } else {
             // 映射计算：将 1~100 映射到 寄存器值 20~28
             // 公式：MinReg + (input * (MaxReg - MinReg) / MaxInput)
@@ -142,8 +145,8 @@ public:
             WriteReg(0x99, reg_val);
 
             // Make sure DLDO1 on
-            uint8_t val = ReadReg(0x90);
-            if (!(val & 0x80)) {
+            uint8_t val = 0;
+            if (TryReadReg(0x90, val) && !(val & 0x80)) {
                 WriteReg(0x90, val | 0x80);
             }
         }
@@ -159,12 +162,11 @@ public:
         if (opt > XPOWERS_AXP2101_CHG_CUR_1000MA) {
             return false;
         }
-        int val = ReadReg(XPOWERS_AXP2101_ICC_CHG_SET);
-        if (val == -1) {
+        uint8_t val = 0;
+        if (!TryReadReg(XPOWERS_AXP2101_ICC_CHG_SET, val)) {
             return false;
         }
-        val &= 0xE0;
-        WriteReg(XPOWERS_AXP2101_ICC_CHG_SET, val | opt);
+        WriteReg(XPOWERS_AXP2101_ICC_CHG_SET, (val & 0xE0) | opt);
         return true;
     }
 
