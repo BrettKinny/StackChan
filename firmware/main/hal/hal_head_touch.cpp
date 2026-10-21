@@ -16,9 +16,10 @@ static const std::string_view _tag = "HAL-HeadTouch";
 
 // HP-PROBE: diagnostic-only episode logger used to collect pat vs idle-noise
 // data before retuning the press rule. Observes samples; never changes the
-// gestures. Set to 0 to compile it out.
+// gestures. Off in release builds; build with -DHEAD_TOUCH_PROBE=1 to collect
+// more data.
 #ifndef HEAD_TOUCH_PROBE
-#define HEAD_TOUCH_PROBE 1
+#define HEAD_TOUCH_PROBE 0
 #endif
 
 // 触摸状态
@@ -30,7 +31,7 @@ struct TouchConfig {
     // at i=[1,2,2] and i=[0,2,1]) missed most light pats: on the 2026-10-20
     // bench, natural fingertip pats lasted 100-210 ms and HIGH x3 caught 4/10,
     // MID x2 catches 8/10. The same bench saw no readings at any level in
-    // 18 min idle. Watch the HP-PROBE 60 s summaries for spurious presses.
+    // 18 min idle. Build with HEAD_TOUCH_PROBE=1 to log HP-PROBE episodes again.
     uint8_t touch_threshold = 2;
     int16_t swipe_threshold = 40;  // 使用百分比，范围-100到100
     // Consecutive 50 ms samples of `is_touched()` required before we accept
