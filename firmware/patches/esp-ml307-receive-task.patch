@@ -1,12 +1,39 @@
 --- a/src/esp/esp_tcp.cc
 +++ b/src/esp/esp_tcp.cc
-@@ -3,4 +3,5 @@
+@@ -1,6 +1,7 @@
+ #include "esp_tcp.h"
+ 
  #include <esp_log.h>
 +#include <esp_heap_caps.h>
  #include <unistd.h>
  #include <cstring>
  #include <arpa/inet.h>
-@@ -63,9 +64,24 @@
+@@ -17,6 +18,22 @@
+ EspTcp::~EspTcp() {
+     Disconnect();
+ 
++    // Dotty: when the server closes the socket, the receive task runs
++    // DoDisconnect(false) itself and sets connected_ = false, so the
++    // Disconnect() above returns without waiting. The task is still finishing
++    // (it sets ESP_TCP_EVENT_RECEIVE_TASK_EXIT on event_group_ and frees its
++    // buffer), and deleting the event group under it corrupted the heap: a
++    // StoreProhibited panic in tlsf_malloc ~1 s after an idle close and
++    // reconnect (2026-10-23 A/V run). Wait for it, unless this is that task.
++    if (event_group_ != nullptr && receive_task_handle_ != nullptr &&
++        xTaskGetCurrentTaskHandle() != receive_task_handle_) {
++        auto bits = xEventGroupWaitBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT,
++                                        pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
++        if (!(bits & ESP_TCP_EVENT_RECEIVE_TASK_EXIT)) {
++            ESP_LOGE(TAG, "Receive task still running at teardown");
++        }
++    }
++
+     if (event_group_ != nullptr) {
+         vEventGroupDelete(event_group_);
+         event_group_ = nullptr;
+@@ -61,12 +78,27 @@
+     connected_ = true;
+ 
      xEventGroupClearBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
 -    xTaskCreate([](void* arg) {
 +    receive_task_handle_ = nullptr;
@@ -32,3 +59,4 @@
 +    last_error_ = 0;
      return true;
  }
+ 
