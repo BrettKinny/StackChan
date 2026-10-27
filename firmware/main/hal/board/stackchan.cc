@@ -287,6 +287,8 @@ private:
     esp_timer_handle_t touchpad_timer_;
     esp_timer_handle_t pek_poll_timer_;
     PowerSaveTimer* power_save_timer_;
+    bool power_save_synced_ = false;
+    bool last_discharging_  = false;
 
     // Shared cleanup path for both idle-shutdown and long-press shutdown.
     // PY32 IO expander stays powered after AXP cuts the system rail, so its
@@ -562,12 +564,16 @@ public:
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
-        static bool last_discharging = false;
-        charging                     = pmic_->IsCharging();
-        discharging                  = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
+        charging    = pmic_->IsCharging();
+        discharging = pmic_->IsDischarging();
+        // Dotty: sync on the first reading too. The timer starts enabled and
+        // used to change only on a discharging edge from false, so on USB
+        // power it was never disabled and the robot powered itself off after
+        // 600 s idle with the voice server down (#194).
+        if (!power_save_synced_ || discharging != last_discharging_) {
             power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
+            last_discharging_  = discharging;
+            power_save_synced_ = true;
         }
 
         level = pmic_->GetBatteryLevel();
