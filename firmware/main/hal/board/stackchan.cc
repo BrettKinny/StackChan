@@ -83,16 +83,36 @@ public:
         SetBrightness(0);
     }
 
-    // Returns true once per long-press event. Clears the PKEY long-press flag
-    // (W1C) so subsequent polls only fire on new presses.
+    // Checked register read. The patched I2cDevice::ReadReg() returns 0xFF on
+    // an I2C error, which reads as "every status bit set"; anything that acts
+    // on a PMIC bit must use this instead.
+    bool TryReadReg(uint8_t reg, uint8_t& value)
+    {
+        return i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 100) == ESP_OK;
+    }
+
+    // Returns true once per PEK long-press. A failed read never counts as a
+    // press, and the latched bit must show on two successful reads in
+    // separate polls (~200 ms apart) before it is cleared (W1C) and reported.
+    // The bit stays latched until cleared, so a real press always confirms.
     bool ConsumePekLongPress()
     {
-        uint8_t status = ReadReg(0x49);
-        if (status & 0x04) {
-            WriteReg(0x49, 0x04);
-            return true;
+        uint8_t status = 0;
+        if (!TryReadReg(0x49, status)) {
+            return false;  // keep pek_pending_ for the next good read
         }
-        return false;
+        if (!(status & 0x04)) {
+            pek_pending_ = false;
+            return false;
+        }
+        if (!pek_pending_) {
+            pek_pending_ = true;
+            ESP_LOGI(TAG, "PEK long-press bit set; confirming on next poll");
+            return false;
+        }
+        pek_pending_ = false;
+        WriteReg(0x49, 0x04);
+        return true;
     }
 
     bool IsExternalPowerConnected()
@@ -108,9 +128,12 @@ public:
     void SetBrightness(uint8_t brightness)
     {
         if (brightness == 0) {
-            // DLDO1 off
-            uint8_t val = ReadReg(0x90);
-            WriteReg(0x90, val & 0x7F);
+            // DLDO1 off. Skip on a failed read: writing back 0xFF & 0x7F
+            // would switch on every other LDO/DLDO rail in 0x90.
+            uint8_t val = 0;
+            if (TryReadReg(0x90, val)) {
+                WriteReg(0x90, val & 0x7F);
+            }
         } else {
             // 映射计算：将 1~100 映射到 寄存器值 20~28
             // 公式：MinReg + (input * (MaxReg - MinReg) / MaxInput)
@@ -122,8 +145,8 @@ public:
             WriteReg(0x99, reg_val);
 
             // Make sure DLDO1 on
-            uint8_t val = ReadReg(0x90);
-            if (!(val & 0x80)) {
+            uint8_t val = 0;
+            if (TryReadReg(0x90, val) && !(val & 0x80)) {
                 WriteReg(0x90, val | 0x80);
             }
         }
@@ -139,14 +162,16 @@ public:
         if (opt > XPOWERS_AXP2101_CHG_CUR_1000MA) {
             return false;
         }
-        int val = ReadReg(XPOWERS_AXP2101_ICC_CHG_SET);
-        if (val == -1) {
+        uint8_t val = 0;
+        if (!TryReadReg(XPOWERS_AXP2101_ICC_CHG_SET, val)) {
             return false;
         }
-        val &= 0xE0;
-        WriteReg(XPOWERS_AXP2101_ICC_CHG_SET, val | opt);
+        WriteReg(XPOWERS_AXP2101_ICC_CHG_SET, (val & 0xE0) | opt);
         return true;
     }
+
+private:
+    bool pek_pending_ = false;
 };
 
 class CustomBacklight : public Backlight {
@@ -262,6 +287,8 @@ private:
     esp_timer_handle_t touchpad_timer_;
     esp_timer_handle_t pek_poll_timer_;
     PowerSaveTimer* power_save_timer_;
+    bool power_save_synced_ = false;
+    bool last_discharging_  = false;
 
     // Shared cleanup path for both idle-shutdown and long-press shutdown.
     // PY32 IO expander stays powered after AXP cuts the system rail, so its
@@ -537,12 +564,16 @@ public:
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
-        static bool last_discharging = false;
-        charging                     = pmic_->IsCharging();
-        discharging                  = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
+        charging    = pmic_->IsCharging();
+        discharging = pmic_->IsDischarging();
+        // Dotty: sync on the first reading too. The timer starts enabled and
+        // used to change only on a discharging edge from false, so on USB
+        // power it was never disabled and the robot powered itself off after
+        // 600 s idle with the voice server down (#194).
+        if (!power_save_synced_ || discharging != last_discharging_) {
             power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
+            last_discharging_  = discharging;
+            power_save_synced_ = true;
         }
 
         level = pmic_->GetBatteryLevel();

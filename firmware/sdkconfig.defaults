@@ -11,7 +11,9 @@ CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION=y
 # CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA is not set
 CONFIG_LANGUAGE_EN_US=y
 CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN=y
-CONFIG_OTA_URL="http://192.168.1.67:8003/xiaozhi/ota/"
+# Your xiaozhi-server: replace <XIAOZHI_HOST> before building (the build stops
+# while the placeholder is still here). Compiled in, so set it per deployment.
+CONFIG_OTA_URL="http://<XIAOZHI_HOST>:8003/xiaozhi/ota/"
 # Wake word: ESP-SR WakeNet9 model selection.
 # Active: Hi, ESP (best-trained English prebuilt — interim Path A, see docs/wake-word.md).
 # Long-term goal: replace with a microWakeWord "Hey Dotty" TFLite model — see

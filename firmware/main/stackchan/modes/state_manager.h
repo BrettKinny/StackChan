@@ -118,12 +118,13 @@ public:
     void onFaceLost();
 
     // xiaozhi chat-state hooks. Called from stackchan_display.cc when
-    // xiaozhi enters LISTENING (user has the turn) or STANDBY (no chat
-    // in flight). Functionally parallel to face_detected/face_lost: voice
+    // xiaozhi enters LISTENING (user has the turn), SPEAKING (Dotty has
+    // the turn), or STANDBY (no chat in flight). Like camera edges, voice
     // activity is the second presence signal that drives idle ↔ talk,
     // so the talk arc still lights even when face detection is unavailable.
-    // Sticky states (STORY_TIME/SECURITY/DANCE) ignore voice edges.
+    // Sticky states (STORY_TIME/SECURITY/SLEEP/DANCE) ignore voice edges.
     void onVoiceListening();
+    void onVoiceSpeaking();
     void onVoiceStandby();
 
     // Phase 5 — capacitive head-pet wake. Called from head_pet.cpp when a
@@ -134,7 +135,7 @@ public:
     // Right-ring listening pixel (global 11). Called from stackchan_display.cc
     // SetStatus() at LISTENING / STANDBY / SPEAKING transitions. Pure flag
     // flip — no state-machine side effects. The state-transition logic lives
-    // in onVoiceListening / onVoiceStandby above.
+    // in onVoiceListening / onVoiceSpeaking / onVoiceStandby above.
     void setListening(bool on);
 
     // Right-ring face-state pixel (global 6). Called from the
@@ -156,15 +157,25 @@ private:
     void onEnterSleep();
     void onExitSleep();
 
-    // Security mode — methodical slow pan loop, modelled on the sleep
-    // pattern (motion-lock + dedicated worker). The pan task is spawned
-    // on entry so the move loop runs off the main task; the lock is held
-    // for the entire SECURITY tenure so idle_motion's SURVEILLANCE
-    // micro-jitters don't fight the deliberate sweep.
+    // Security mode — methodical slow pan, modelled on the sleep pattern
+    // (motion lock held for the whole SECURITY tenure so idle_motion's
+    // SURVEILLANCE micro-jitters and face_tracking don't fight the sweep).
+    //
+    // The sweep is a non-blocking leg sequencer advanced from _update(),
+    // i.e. on the stackchan update task under the LVGL lock — the same
+    // context every other motion writer uses (issue #166). It used to be a
+    // dedicated "sec_pan" FreeRTOS task, which had two defects: (1) its
+    // 4 KB internal-RAM stack allocation was never checked, so under the
+    // camera + AFE memory pressure of security mode xTaskCreatePinnedToCore
+    // could fail silently while the log still said "pan task started" —
+    // consistent with #166's evidence (state_changed + security_pose fired,
+    // the head never moved; unconfirmed without a serial capture); (2) it
+    // drove the SCS servo bus and the servo animation state from a second
+    // task without the LVGL lock, racing Servo::update() on the bus.
     void onEnterSecurity();
     void onExitSecurity();
-    static void securityPanTaskEntry(void* arg);
-    void runSecurityPanLoop();
+    void startSecurityLeg(uint8_t leg, uint32_t now);
+    void updateSecuritySweep(uint32_t now);
 
     // Dance mode — the xiaozhi server owns named/song-length choreography.
     // Firmware holds the cooperative motion lock for the state's lifetime so
@@ -195,13 +206,11 @@ private:
     // completes so the head can droop under gravity.
     bool     _sleep_torque_release_pending = false;
 
-    // Security pan task lifecycle. _security_running flips false on exit;
-    // the worker checks it between every step + dwell and drops out cleanly.
-    // _security_stop_sem signals the worker has exited so onExitSecurity
-    // can release the motion lock without racing the final move command.
-    TaskHandle_t      _security_task_handle = nullptr;
-    std::atomic<bool> _security_running{false};
-    SemaphoreHandle_t _security_stop_sem    = nullptr;
+    // Security sweep sequencer state (see onEnterSecurity). Only touched
+    // from setState() and _update(), both of which run under the LVGL lock.
+    bool     _security_sweep_active    = false;
+    uint8_t  _security_leg             = 0;
+    uint32_t _security_leg_deadline_ms = 0;
 
 };
 

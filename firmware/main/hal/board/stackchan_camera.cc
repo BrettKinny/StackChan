@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <esp_heap_caps.h>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 
 #include "esp_imgfx_color_convert.h"
@@ -392,10 +393,6 @@ bool StackChanCamera::Capture()
     // take_photo call. esp_log_timestamp() returns ms since boot
     // (uint32_t, wraps every ~49 days — informational use only).
     last_capture_ts_ms_ = esp_log_timestamp();
-
-    if (encoder_thread_.joinable()) {
-        encoder_thread_.join();
-    }
 
     if (video_fd_ < 0) {
         return false;
@@ -964,10 +961,6 @@ void StackChanCamera::stopStreaming()
 
 bool StackChanCamera::StreamCaptures()
 {
-    if (encoder_thread_.joinable()) {
-        encoder_thread_.join();
-    }
-
     if (!streaming_on_ || video_fd_ < 0) {
         return false;
     }
@@ -1132,7 +1125,7 @@ bool StackChanCamera::SetVFlip(bool enabled)
  *                  {"success": false, "message": "错误信息"}
  *
  * @note 调用此函数前必须先调用SetExplainUrl()设置服务器URL
- * @note 函数会等待之前的编码线程完成后再开始新的处理
+ * @note JPEG encoding owns the camera arbiter; HTTP sends only owned JPEG data.
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
 std::string StackChanCamera::Explain(const std::string& question)
@@ -1149,43 +1142,33 @@ std::string StackChanCamera::StreamJpegToBridge(
         throw std::runtime_error("Bridge URL is not set");
     }
 
-    QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
-    if (jpeg_queue == nullptr) {
-        ESP_LOGE(TAG, "Failed to create JPEG queue");
-        throw std::runtime_error("Failed to create JPEG queue");
-    }
-
-    // Encode JPEG on a worker thread (~500ms, ~8KB SRAM).
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
-        uint16_t w             = frame_.width ? frame_.width : 320;
-        uint16_t h             = frame_.height ? frame_.height : 240;
-        v4l2_pix_fmt_t enc_fmt = frame_.format;
-        bool ok                = image_to_jpeg_cb(
-                           frame_.data, frame_.len, w, h, enc_fmt, 80,
-                           [](void* arg, size_t index, const void* data, size_t len) -> size_t {
-                auto jpeg_queue = static_cast<QueueHandle_t>(arg);
-                JpegChunk chunk = {.data = nullptr, .len = len};
-                if (index == 0 && data != nullptr && len > 0) {
-                    chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                    if (chunk.data == nullptr) {
-                        ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
-                        chunk.len = 0;
-                    } else {
-                        memcpy(chunk.data, data, len);
-                    }
-                } else {
-                    chunk.len = 0;  // Sentinel or error
-                }
-                xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-                return len;
-                           },
-                           jpeg_queue);
-
-        if (!ok) {
-            JpegChunk chunk = {.data = nullptr, .len = 0};
-            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+    // Own the complete PSRAM JPEG. Face detection may neither join another
+    // caller's encoder nor replace its frame while encoding. No camera lock
+    // is retained across HTTP operations.
+    struct JpegBuffer {
+        uint8_t* data = nullptr;
+        size_t size = 0;
+        ~JpegBuffer() { heap_caps_free(data); }
+    } jpeg;
+    size_t captured_frame_size = 0;
+    {
+        auto& arbiter = stackchan::CameraArbiter::getInstance();
+        if (!arbiter.acquireForCapture(2000)) {
+            throw std::runtime_error("Camera busy while preparing JPEG");
         }
-    });
+        struct ArbiterGuard {
+            stackchan::CameraArbiter& arbiter;
+            ~ArbiterGuard() { arbiter.releaseForCapture(); }
+        } guard{arbiter};
+        captured_frame_size = frame_.len;
+        const bool ok = image_to_jpeg(
+            frame_.data, frame_.len, frame_.width ? frame_.width : 320,
+            frame_.height ? frame_.height : 240, frame_.format, 80,
+            &jpeg.data, &jpeg.size);
+        if (!ok || jpeg.data == nullptr || jpeg.size == 0) {
+            throw std::runtime_error("Failed to encode image to JPEG");
+        }
+    }
 
     auto network = Board::GetInstance().GetNetwork();
     auto http    = network->CreateHttp(3);
@@ -1200,18 +1183,15 @@ std::string StackChanCamera::StreamJpegToBridge(
     http->SetHeader("Transfer-Encoding", "chunked");
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "Failed to connect to bridge URL: %s", url.c_str());
-        encoder_thread_.join();
-        JpegChunk chunk;
-        while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
-            if (chunk.data != nullptr) {
-                heap_caps_free(chunk.data);
-            } else {
-                break;
-            }
-        }
-        vQueueDelete(jpeg_queue);
         throw std::runtime_error("Failed to connect to bridge URL");
     }
+    const auto write = [&http](const char* data, size_t size) {
+        const int written = http->Write(data, size);
+        // Chunked transports may include framing in the returned count.
+        if (written < 0 || static_cast<size_t>(written) < size) {
+            throw std::runtime_error("Failed to send camera upload data");
+        }
+    };
 
     // Form fields (e.g. {"question", text} or {"name", text}) emitted before the file part.
     for (const auto& field : extra_fields) {
@@ -1220,7 +1200,7 @@ std::string StackChanCamera::StreamJpegToBridge(
         body += "Content-Disposition: form-data; name=\"" + field.first + "\"\r\n";
         body += "\r\n";
         body += field.second + "\r\n";
-        http->Write(body.c_str(), body.size());
+        write(body.c_str(), body.size());
     }
     {
         std::string file_header;
@@ -1228,43 +1208,25 @@ std::string StackChanCamera::StreamJpegToBridge(
         file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n";
         file_header += "Content-Type: image/jpeg\r\n";
         file_header += "\r\n";
-        http->Write(file_header.c_str(), file_header.size());
+        write(file_header.c_str(), file_header.size());
     }
 
-    size_t total_sent   = 0;
-    bool saw_terminator = false;
-    while (true) {
-        JpegChunk chunk;
-        if (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) != pdPASS) {
-            ESP_LOGE(TAG, "Failed to receive JPEG chunk");
-            break;
-        }
-        if (chunk.data == nullptr) {
-            saw_terminator = true;
-            break;
-        }
-        http->Write((const char*)chunk.data, chunk.len);
-        total_sent += chunk.len;
-        heap_caps_free(chunk.data);
-    }
-    encoder_thread_.join();
-    vQueueDelete(jpeg_queue);
-
-    if (!saw_terminator || total_sent == 0) {
-        ESP_LOGE(TAG, "JPEG encoder failed or produced empty output");
-        throw std::runtime_error("Failed to encode image to JPEG");
-    }
+    write(reinterpret_cast<const char*>(jpeg.data), jpeg.size);
 
     {
         std::string multipart_footer;
         multipart_footer += "\r\n--" + boundary + "--\r\n";
-        http->Write(multipart_footer.c_str(), multipart_footer.size());
+        write(multipart_footer.c_str(), multipart_footer.size());
     }
-    http->Write("", 0);
+    write("", 0);
 
-    if (http->GetStatusCode() != 200) {
-        ESP_LOGE(TAG, "Bridge upload failed, status=%d url=%s",
-                 http->GetStatusCode(), url.c_str());
+    const auto response_wait_started = std::chrono::steady_clock::now();
+    const int status = http->GetStatusCode();
+    if (status != 200) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - response_wait_started).count();
+        ESP_LOGE(TAG, "Bridge upload failed, status=%d network_error=%d wait_ms=%d url=%s",
+                 status, http->GetLastError(), static_cast<int>(elapsed_ms), url.c_str());
         throw std::runtime_error("Failed to upload to bridge");
     }
 
@@ -1273,8 +1235,7 @@ std::string StackChanCamera::StreamJpegToBridge(
 
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
     ESP_LOGI(TAG, "StreamJpegToBridge url=%s frame=%d compressed=%d stack=%d\n%s",
-             url.c_str(), (int)frame_.len, (int)total_sent,
+             url.c_str(), (int)captured_frame_size, (int)jpeg.size,
              (int)remain_stack_size, result.c_str());
     return result;
 }
-

@@ -80,34 +80,27 @@ int SCSerial::readSCS(unsigned char *nDat, int nLen)
 
     int Size        = 0;
     int64_t t_begin = esp_timer_get_time() / 1000;  // Convert to milliseconds
-    int64_t t_user;
 
-    while (1) {
-        size_t available = 0;
-        uart_get_buffered_data_len(uart_num, &available);
-
-        if (available > 0) {
-            unsigned char byte;
-            int len = uart_read_bytes(uart_num, &byte, 1, 0);
-            if (len > 0) {
-                if (nDat) {
-                    nDat[Size] = byte;
-                }
-                Size++;
-                t_begin = esp_timer_get_time() / 1000;
+    // Dotty: block in the UART driver until a byte arrives or the timeout
+    // (measured from the last byte) runs out. The old loop slept with
+    // vTaskDelay(1 / portTICK_PERIOD_MS), which is vTaskDelay(0) at 100 Hz,
+    // so a servo that didn't answer kept CPU 1 busy and starved IDLE1 (task
+    // watchdog every 10 s, AFE feed overflow; 2026-10-27, #193).
+    while (Size < nLen) {
+        int64_t remaining = (int64_t)IOTimeOut - ((esp_timer_get_time() / 1000) - t_begin);
+        if (remaining <= 0) {
+            break;
+        }
+        TickType_t wait = pdMS_TO_TICKS(remaining);
+        unsigned char byte;
+        int len = uart_read_bytes(uart_num, &byte, 1, wait > 0 ? wait : 1);
+        if (len > 0) {
+            if (nDat) {
+                nDat[Size] = byte;
             }
+            Size++;
+            t_begin = esp_timer_get_time() / 1000;
         }
-
-        if (Size >= nLen) {
-            break;
-        }
-
-        t_user = (esp_timer_get_time() / 1000) - t_begin;
-        if (t_user > IOTimeOut) {
-            break;
-        }
-
-        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 
     return Size;

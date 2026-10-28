@@ -54,7 +54,7 @@ void StateManager::setState(State next)
         mclog::tagInfo(_tag, "state {} -> {}", stateName(prev), stateName(next));
         // Exit hook for the OUTGOING state runs FIRST, before we touch the
         // new state's profile or entry hook. Security needs to tear down its
-        // pan task and release the motion lock before any successor state
+        // sweep and release the motion lock before any successor state
         // takes over. Dance tears down its choreography modifier here too so
         // the next state's left-ring writes don't fight a still-running
         // keyframe timeline.
@@ -220,6 +220,16 @@ void StateManager::onVoiceListening()
     }
 }
 
+void StateManager::onVoiceSpeaking()
+{
+    // A proactive/admin reply can start before any LISTENING edge. Claim
+    // TALK for the entire reply so ambient consumers yield to conversation.
+    // Keep the listening LED separate and never wake privacy SLEEP here.
+    if (_state == State::IDLE) {
+        setState(State::TALK);
+    }
+}
+
 void StateManager::onVoiceStandby()
 {
     // xiaozhi returned to STANDBY — no chat in flight. Drop back to IDLE
@@ -323,6 +333,26 @@ void StateManager::onExitSleep()
                          "camera + mic re-enabled");
 }
 
+namespace {
+// Security sweep legs. Each leg moves at speed 50 (slow), then holds until
+// the leg's deadline: ~3 s for the move to settle plus a dwell. Full cycle:
+// -500 -> +500 -> 0 -> pause = ~15 s, matching the former task loop.
+// Magnitudes: +/-500 matches the SURVEILLANCE profile's yaw amplitude, so
+// the scan stays within the visually sensible range for the pose.
+struct SecurityLeg {
+    int         yaw;
+    uint32_t    hold_ms;
+    const char* tag;
+};
+constexpr SecurityLeg kSecurityLegs[] = {
+    {-500, 4000, "state_manager_security_leg1"},
+    { 500, 4000, "state_manager_security_leg2"},
+    {   0, 7000, "state_manager_security_centre"},
+};
+constexpr uint8_t kSecurityLegCount   = sizeof(kSecurityLegs) / sizeof(kSecurityLegs[0]);
+constexpr int     kSecuritySweepSpeed = 50;
+}  // namespace
+
 void StateManager::onEnterSecurity()
 {
     auto& sc = ::GetStackChan();
@@ -336,46 +366,22 @@ void StateManager::onEnterSecurity()
     //    pan. Released in onExitSecurity. Refcounted lock — face_tracking /
     //    StackChanCamera capture guards still nest inside us cleanly.
     sc.motion().setModifyLock(true);
-    // 2. Spawn the pan worker. Idempotent: if a stale handle exists from a
-    //    racey re-entry, we tear it down first. Mirror of FaceDetector's
-    //    start/stop pattern (atomic _running flag + binary stop semaphore).
-    if (_security_task_handle != nullptr) {
-        mclog::tagWarn(_tag, "security: stale task handle on entry, tearing down");
-        _security_running.store(false, std::memory_order_release);
-        if (_security_stop_sem) {
-            xSemaphoreTake(_security_stop_sem, pdMS_TO_TICKS(2000));
-            vSemaphoreDelete(_security_stop_sem);
-            _security_stop_sem = nullptr;
-        }
-        _security_task_handle = nullptr;
-    }
-    _security_running.store(true, std::memory_order_release);
-    _security_stop_sem = xSemaphoreCreateBinary();
+    // 2. Start the sweep. The first leg is commanded right here (setState
+    //    runs under the LVGL lock, like every MCP motion tool), so the head
+    //    starts moving in the same tick that security_pose is emitted. Later
+    //    legs are advanced by updateSecuritySweep() from _update().
+    _security_sweep_active = true;
     Application::GetInstance().SendEvent("security_pose", "{\"phase\":\"scan_start\"}");
-    // 4 KB stack is plenty — the loop just calls motion APIs and sleeps.
-    // Pinned to Core 1 (same as the main task) to keep Core 0 free for the
-    // detector / audio pipelines. Priority 1 = same as face_det.
-    xTaskCreatePinnedToCore(securityPanTaskEntry, "sec_pan", 4096, this, 1,
-                             &_security_task_handle, 1);
-    mclog::tagInfo(_tag, "security: lock taken, pan task started");
+    startSecurityLeg(0, GetHAL().millis());
+    mclog::tagInfo(_tag, "security: lock taken, sweep started (in-loop sequencer)");
 }
 
 void StateManager::onExitSecurity()
 {
     auto& sc = ::GetStackChan();
-    // 1. Signal the worker to drop out, then wait up to 2 s for it to clear.
-    //    The worker checks _security_running between every sleep tick, so
-    //    typical exit latency is sub-second — but a long pan move in flight
-    //    (3 s settle) means the slow path can take up to ~4 s. 2 s is a
-    //    reasonable cap; if it expires we proceed anyway and rely on the
-    //    task's own vTaskDelete to land before the next entry.
-    _security_running.store(false, std::memory_order_release);
-    if (_security_stop_sem) {
-        xSemaphoreTake(_security_stop_sem, pdMS_TO_TICKS(2000));
-        vSemaphoreDelete(_security_stop_sem);
-        _security_stop_sem = nullptr;
-    }
-    _security_task_handle = nullptr;
+    // 1. Stop the sequencer. Nothing runs off-task, so there is nothing to
+    //    join and no blocking wait while the caller holds the LVGL lock.
+    _security_sweep_active = false;
     // 2. Release the motion modify lock so the successor state's idle /
     //    chat / dance overlays can drive the head again.
     sc.motion().setModifyLock(false);
@@ -386,7 +392,30 @@ void StateManager::onExitSecurity()
     if (sc.hasAvatar()) {
         sc.avatar().setEmotion(avatar::Emotion::Neutral);
     }
-    mclog::tagInfo(_tag, "security: pan task stopped, lock released, head to home");
+    mclog::tagInfo(_tag, "security: sweep stopped, lock released, head to home");
+}
+
+void StateManager::startSecurityLeg(uint8_t leg, uint32_t now)
+{
+    if (leg >= kSecurityLegCount) {
+        leg = 0;
+    }
+    const auto& l             = kSecurityLegs[leg];
+    _security_leg             = leg;
+    _security_leg_deadline_ms = now + l.hold_ms;
+    ::GetStackChan().motion().moveWithSpeed(l.yaw, 0, kSecuritySweepSpeed, l.tag);
+}
+
+void StateManager::updateSecuritySweep(uint32_t now)
+{
+    if (!_security_sweep_active || _state != State::SECURITY) {
+        return;
+    }
+    // Wrap-safe deadline check (millis() is a 32-bit counter).
+    if (static_cast<int32_t>(now - _security_leg_deadline_ms) < 0) {
+        return;
+    }
+    startSecurityLeg(static_cast<uint8_t>((_security_leg + 1) % kSecurityLegCount), now);
 }
 
 void StateManager::onEnterDance()
@@ -403,67 +432,6 @@ void StateManager::onExitDance()
 {
     ::GetStackChan().motion().setModifyLock(false);
     mclog::tagInfo(_tag, "dance: server choreography ownership released");
-}
-
-void StateManager::securityPanTaskEntry(void* arg)
-{
-    auto* self = static_cast<StateManager*>(arg);
-    self->runSecurityPanLoop();
-    if (self->_security_stop_sem) {
-        xSemaphoreGive(self->_security_stop_sem);
-    }
-    vTaskDelete(nullptr);
-}
-
-void StateManager::runSecurityPanLoop()
-{
-    // Methodical surveillance sweep. Each leg moves at speed 50 (slow) and
-    // sleeps ~3 s for the move to settle, then dwells 1 s at the extreme
-    // before the next leg. Full cycle: -500 → +500 → 0 → pause = ~14 s.
-    // We re-check _security_running between every step so an exit during
-    // a pan or dwell drops out within at most one settle (3 s).
-    //
-    // Magnitudes: ±500 matches the SURVEILLANCE profile's yaw amplitude
-    // (idle_motion uses ±500 in this same band, so we stay within the
-    // visually sensible scan range for the pose).
-    auto& sc = ::GetStackChan();
-    auto check_running = [this]() {
-        return _security_running.load(std::memory_order_acquire);
-    };
-    // Sleep helper that yields in ~50 ms slices so we drop out promptly.
-    auto sleep_ms = [&check_running](uint32_t total_ms) {
-        const uint32_t slice = 50;
-        uint32_t elapsed = 0;
-        while (elapsed < total_ms && check_running()) {
-            uint32_t step = (total_ms - elapsed) < slice ? (total_ms - elapsed) : slice;
-            vTaskDelay(pdMS_TO_TICKS(step));
-            elapsed += step;
-        }
-    };
-
-    while (check_running()) {
-        // Leg 1 — full left.
-        sc.motion().moveWithSpeed(-500, 0, 50, "state_manager_security_leg1");
-        sleep_ms(3000);
-        if (!check_running()) break;
-        sleep_ms(1000);  // dwell at extreme
-        if (!check_running()) break;
-
-        // Leg 2 — full right.
-        sc.motion().moveWithSpeed(500, 0, 50, "state_manager_security_leg2");
-        sleep_ms(3000);
-        if (!check_running()) break;
-        sleep_ms(1000);  // dwell at extreme
-        if (!check_running()) break;
-
-        // Leg 3 — back to centre, then a longer 4 s pause before repeating
-        // gives the cadence its "heads up, scanning" rhythm rather than
-        // continuous churn.
-        sc.motion().moveWithSpeed(0, 0, 50, "state_manager_security_centre");
-        sleep_ms(3000);
-        if (!check_running()) break;
-        sleep_ms(4000);
-    }
 }
 
 void StateManager::applyIdleProfile()
@@ -594,6 +562,11 @@ void StateManager::_update(Modifiable& stackchan)
     //      check never reports settled.
     // Either path is one-shot — _sleep_torque_release_pending clears on
     // first fire.
+    // Security sweep — advance to the next leg once the current one's hold
+    // deadline passes. Runs every tick (not only on the 5 Hz pip tick) so
+    // leg timing is not quantised to 200 ms.
+    updateSecuritySweep(now);
+
     if (_sleep_torque_release_pending && _state == State::SLEEP) {
         const bool settled = !stackchan.motion().isMoving();
         const bool timeout = (now - _state_change_ms) > kSleepTorqueReleaseTimeoutMs;

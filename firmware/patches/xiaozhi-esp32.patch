@@ -1,8 +1,8 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..652f4db 100644
+index d69d43d..8506f42 100644
 --- c/main/application.cc
 +++ w/main/application.cc
-@@ -9,6 +9,9 @@
+@@ -9,8 +9,12 @@
  #include "mcp_server.h"
  #include "assets.h"
  #include "settings.h"
@@ -11,8 +11,34 @@ index d69d43d..652f4db 100644
 +#include <stackchan/modes/state_manager.h>
  
  #include <cstring>
++#include <algorithm>
  #include <esp_log.h>
-@@ -249,11 +252,29 @@ void Application::Run() {
+ #include <cJSON.h>
+ #include <driver/gpio.h>
+@@ -185,8 +189,21 @@ void Application::Run() {
+         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+ 
+         if (bits & MAIN_EVENT_ERROR) {
++            // Dotty (#180): a voice server that is down or not answering
++            // (connect refused / hello timeout) is a resting condition
++            // when the host stops xiaozhi-server on purpose. Treat it as a
++            // calm offline state with backoff instead of an error alert +
++            // exclamation sound. A Connecting state here means a user- or
++            // face-initiated attempt, which gets a brief friendly notice;
++            // ambient attempts (perception events, idle reopen) stay silent.
++            const bool user_visible = GetDeviceState() == kDeviceStateConnecting;
+             SetDeviceState(kDeviceStateIdle);
+-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
++            if (last_error_message_ == Lang::Strings::SERVER_NOT_CONNECTED ||
++                last_error_message_ == Lang::Strings::SERVER_TIMEOUT) {
++                NoteServerUnreachable(user_visible);
++            } else {
++                Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
++            }
+         }
+ 
+         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
+@@ -249,11 +266,41 @@ void Application::Run() {
              clock_ticks_++;
              auto display = Board::GetInstance().GetDisplay();
              display->UpdateStatusBar();
@@ -23,6 +49,15 @@ index d69d43d..652f4db 100644
                  SystemInfo::PrintHeapStats();
              }
 +
++            // Dotty (#180): the offline notice is transient — clear it once
++            // its time is up, unless something else now owns the bubble.
++            if (offline_notice_clear_tick_ >= 0 && clock_ticks_ >= offline_notice_clear_tick_) {
++                offline_notice_clear_tick_ = -1;
++                if (GetDeviceState() == kDeviceStateIdle && !privacy_gate_) {
++                    display->SetChatMessage("system", "");
++                }
++            }
++
 +            // Dotty: proactive WS reconnect on idle-channel timeout.
 +            // IsTimeout() flips at 120 s of silence on the channel, but
 +            // the OS-level TCP teardown can take another ~45 s on top of
@@ -30,10 +65,13 @@ index d69d43d..652f4db 100644
 +            // walk-up events until a manual nudge re-opens the channel.
 +            // While idle, eagerly close+reopen so the next SendEvent /
 +            // wake-word / listen path finds a live channel waiting.
++            // Dotty (#180): while the voice server is offline this is the
++            // periodic reachability probe, rate-limited by the backoff.
 +            if (clock_ticks_ % 30 == 0 &&
 +                GetDeviceState() == kDeviceStateIdle &&
 +                protocol_ != nullptr &&
-+                protocol_->IsTimeout()) {
++                protocol_->IsTimeout() &&
++                AmbientReconnectAllowed()) {
 +                ESP_LOGW(TAG, "Idle channel timeout — proactive close+reopen");
 +                protocol_->CloseAudioChannel();
 +                if (!protocol_->OpenAudioChannel()) {
@@ -43,10 +81,88 @@ index d69d43d..652f4db 100644
          }
      }
  }
-@@ -507,6 +528,16 @@ void Application::InitializeProtocol() {
+@@ -317,6 +364,11 @@ void Application::HandleActivationDoneEvent() {
+     Schedule([this]() {
+         // Play the success sound to indicate the device is ready
+         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
++        // Dotty (#180): booted while the voice server was unreachable.
++        // Scheduled so it lands after the Idle entry clears the bubble.
++        if (server_offline_.load(std::memory_order_acquire)) {
++            ShowServerOfflineNotice();
++        }
+     });
+ }
+ 
+@@ -410,14 +462,47 @@ void Application::CheckNewVersion() {
+             retry_count++;
+             if (retry_count >= MAX_RETRY) {
+                 ESP_LOGE(TAG, "Too many retries, exit version check");
++                ota_check_failed_ = true;
+                 return;
+             }
+ 
+             char error_message[128];
+             snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
+-            char buffer[256];
+-            snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
+-            Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
++
++            // Dotty (#180): the OTA endpoint is served by the same
++            // xiaozhi-server the host stops on purpose, so on a provisioned
++            // device (cached websocket URL from an earlier check) an
++            // unreachable OTA endpoint means "voice is off", not "update
++            // failed". Show a calm notice (no error face, no exclamation
++            // sound), retry briefly, then continue to Idle on the cached
++            // config so the robot is usable and reconnects by itself when
++            // the server returns. The firmware upgrade check is skipped for
++            // this boot only; MarkCurrentVersionValid() is deliberately not
++            // called (same as upstream's give-up path), so rollback
++            // protection for a freshly OTA'd image is unchanged.
++            // Unprovisioned devices keep the upstream error alert, which
++            // carries the URL/code an operator needs for setup.
++            const bool have_cached_ws = !Settings("websocket", false).GetString("url").empty();
++            if (have_cached_ws) {
++                constexpr int kOfflineBootAttempts = 3;
++                ESP_LOGW(TAG, "Voice server unreachable at boot (%s), attempt %d/%d",
++                         error_message, retry_count, kOfflineBootAttempts);
++                if (retry_count >= kOfflineBootAttempts) {
++                    ESP_LOGW(TAG, "Continuing offline with cached websocket config");
++                    ota_check_failed_ = true;
++                    offline_backoff_s_ = 15;
++                    next_ambient_reconnect_ms_.store(
++                        static_cast<uint32_t>(esp_timer_get_time() / 1000) + offline_backoff_s_ * 1000,
++                        std::memory_order_release);
++                    server_offline_.store(true, std::memory_order_release);
++                    return;
++                }
++                display->SetChatMessage("system", "Voice is offline. Retrying...");
++            } else {
++                char buffer[256];
++                snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
++                Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
++            }
+ 
+             ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay, retry_count, MAX_RETRY);
+             for (int i = 0; i < retry_delay; i++) {
+@@ -481,6 +566,12 @@ void Application::InitializeProtocol() {
+         protocol_ = std::make_unique<MqttProtocol>();
+     } else if (ota_->HasWebsocketConfig()) {
+         protocol_ = std::make_unique<WebsocketProtocol>();
++    } else if (ota_check_failed_ && !Settings("websocket", false).GetString("url").empty()) {
++        // Dotty (#180): OTA check unreachable — reuse the websocket config
++        // persisted by the last successful check instead of falling through
++        // to an unconfigured MQTT protocol that can never connect.
++        ESP_LOGW(TAG, "OTA check failed; using cached websocket config");
++        protocol_ = std::make_unique<WebsocketProtocol>();
+     } else {
+         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
+         protocol_ = std::make_unique<MqttProtocol>();
+@@ -507,6 +598,18 @@ void Application::InitializeProtocol() {
              ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                  protocol_->server_sample_rate(), codec->output_sample_rate());
          }
++        // Dotty (#180): any successful open proves the server is back.
++        NoteServerReachable();
 +        // Dotty (issue #21): re-fire current state on every channel open so
 +        // the server-side perception store re-syncs after a restart / network
 +        // drop that re-initialised it to IDLE. StateManager owns the truth;
@@ -60,7 +176,7 @@ index d69d43d..652f4db 100644
      });
      
      protocol_->OnAudioChannelClosed([this, &board]() {
-@@ -526,7 +557,6 @@ void Application::InitializeProtocol() {
+@@ -526,7 +629,6 @@ void Application::InitializeProtocol() {
              if (strcmp(state->valuestring, "start") == 0) {
                  Schedule([this]() {
                      aborted_ = false;
@@ -68,7 +184,7 @@ index d69d43d..652f4db 100644
                  });
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
-@@ -542,7 +572,10 @@ void Application::InitializeProtocol() {
+@@ -542,7 +644,10 @@ void Application::InitializeProtocol() {
                  auto text = cJSON_GetObjectItem(root, "text");
                  if (cJSON_IsString(text)) {
                      ESP_LOGI(TAG, "<< %s", text->valuestring);
@@ -80,7 +196,7 @@ index d69d43d..652f4db 100644
                          display->SetChatMessage("assistant", message.c_str());
                      });
                  }
-@@ -553,10 +586,12 @@ void Application::InitializeProtocol() {
+@@ -553,10 +658,12 @@ void Application::InitializeProtocol() {
                  ESP_LOGI(TAG, ">> %s", text->valuestring);
                  Schedule([display, message = std::string(text->valuestring)]() {
                      display->SetChatMessage("user", message.c_str());
@@ -93,7 +209,7 @@ index d69d43d..652f4db 100644
              if (cJSON_IsString(emotion)) {
                  Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                      display->SetEmotion(emotion_str.c_str());
-@@ -610,33 +645,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +717,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -155,7 +271,7 @@ index d69d43d..652f4db 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -711,13 +749,23 @@ void Application::HandleToggleChatEvent() {
+@@ -711,13 +821,23 @@ void Application::HandleToggleChatEvent() {
  }
  
  void Application::ContinueOpenAudioChannel(ListeningMode mode) {
@@ -181,7 +297,16 @@ index d69d43d..652f4db 100644
              return;
          }
      }
-@@ -782,6 +830,22 @@ void Application::HandleWakeWordDetectedEvent() {
+@@ -774,7 +894,7 @@ void Application::HandleStopListeningEvent() {
+ }
+ 
+ void Application::HandleWakeWordDetectedEvent() {
+-    if (!protocol_) {
++    if (!protocol_ || privacy_gate_) {
+         return;
+     }
+ 
+@@ -782,6 +902,22 @@ void Application::HandleWakeWordDetectedEvent() {
      auto wake_word = audio_service_.GetLastWakeWord();
      ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
  
@@ -204,7 +329,43 @@ index d69d43d..652f4db 100644
      if (state == kDeviceStateIdle) {
          audio_service_.EncodeWakeWord();
          auto wake_word = audio_service_.GetLastWakeWord();
-@@ -861,21 +925,43 @@ void Application::HandleStateChangedEvent() {
+@@ -820,18 +956,32 @@ void Application::HandleWakeWordDetectedEvent() {
+ }
+ 
+ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+-    // Check state again in case it was changed during scheduling
+-    if (GetDeviceState() != kDeviceStateConnecting) {
++    // A healthy ambient channel takes the direct Idle path; a closed
++    // channel takes the scheduled Connecting path. Reject stale work and
++    // privacy sleep in both cases before touching audio.
++    const auto can_continue = [this]() {
++        const auto state = GetDeviceState();
++        return !privacy_gate_ &&
++            (state == kDeviceStateIdle || state == kDeviceStateConnecting);
++    };
++    if (!protocol_ || !can_continue()) {
+         return;
+     }
+ 
+     if (!protocol_->IsAudioChannelOpened()) {
+         if (!protocol_->OpenAudioChannel()) {
+-            audio_service_.EnableWakeWordDetection(true);
++            if (can_continue()) {
++                audio_service_.EnableWakeWordDetection(true);
++            }
+             return;
+         }
+     }
+ 
++    // Network open can block while another task engages privacy sleep.
++    if (!can_continue()) {
++        return;
++    }
++
+     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+ #if CONFIG_SEND_WAKE_WORD_DATA
+     // Encode and send the wake word data to the server
+@@ -861,21 +1011,43 @@ void Application::HandleStateChangedEvent() {
      auto led = board.GetLed();
      led->OnStateChanged();
      
@@ -249,7 +410,7 @@ index d69d43d..652f4db 100644
              display->SetStatus(Lang::Strings::LISTENING);
              display->SetEmotion("neutral");
  
-@@ -886,7 +972,7 @@ void Application::HandleStateChangedEvent() {
+@@ -886,7 +1058,7 @@ void Application::HandleStateChangedEvent() {
                  if (listening_mode_ == kListeningModeAutoStop) {
                      audio_service_.WaitForPlaybackQueueEmpty();
                  }
@@ -258,7 +419,7 @@ index d69d43d..652f4db 100644
                  // Send the start listening command
                  protocol_->SendStartListening(listening_mode_);
                  audio_service_.EnableVoiceProcessing(true);
-@@ -907,6 +993,12 @@ void Application::HandleStateChangedEvent() {
+@@ -907,6 +1079,12 @@ void Application::HandleStateChangedEvent() {
              }
              break;
          case kDeviceStateSpeaking:
@@ -271,7 +432,16 @@ index d69d43d..652f4db 100644
              display->SetStatus(Lang::Strings::SPEAKING);
  
              if (listening_mode_ != kListeningModeRealtime) {
-@@ -1075,6 +1167,63 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1017,7 +1195,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+ }
+ 
+ void Application::WakeWordInvoke(const std::string& wake_word) {
+-    if (!protocol_) {
++    if (!protocol_ || privacy_gate_) {
+         return;
+     }
+ 
+@@ -1075,6 +1253,124 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -288,6 +458,12 @@ index d69d43d..652f4db 100644
 +    Schedule([this, name, data_json]() {
 +        if (!protocol_) return;
 +        if (!protocol_->IsAudioChannelOpened()) {
++            // Dotty (#180): voice server offline — drop ambient events
++            // quietly until the backoff allows another probe. State is
++            // re-synced on reconnect (reemitState, issue #21).
++            if (!AmbientReconnectAllowed()) {
++                return;
++            }
 +            if (!protocol_->OpenAudioChannel()) {
 +                ESP_LOGW(TAG, "SendEvent: failed to open WS for %s", name.c_str());
 +                return;
@@ -332,14 +508,82 @@ index d69d43d..652f4db 100644
 +    });
 +}
 +
++// Dotty (#180): voice-server reachability helpers.
++bool Application::AmbientReconnectAllowed() const {
++    if (!server_offline_.load(std::memory_order_acquire)) {
++        return true;
++    }
++    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
++    // Wrap-safe: millisecond counter wraps every ~49 days.
++    return static_cast<int32_t>(now_ms - next_ambient_reconnect_ms_.load(std::memory_order_acquire)) >= 0;
++}
++
++void Application::NoteServerUnreachable(bool user_visible) {
++    constexpr int kInitialBackoffS = 15;
++    constexpr int kMaxBackoffS     = 120;
++    const bool was_offline = server_offline_.exchange(true, std::memory_order_acq_rel);
++    offline_backoff_s_ = (was_offline && offline_backoff_s_ > 0)
++        ? std::min(offline_backoff_s_ * 2, kMaxBackoffS)
++        : kInitialBackoffS;
++    next_ambient_reconnect_ms_.store(
++        static_cast<uint32_t>(esp_timer_get_time() / 1000) + offline_backoff_s_ * 1000,
++        std::memory_order_release);
++    ESP_LOGW(TAG, "Voice server unreachable (%s); ambient reconnect in %d s",
++             last_error_message_.c_str(), offline_backoff_s_);
++    if (user_visible) {
++        // Scheduled so it lands after the Idle entry clears the bubble.
++        Schedule([this]() { ShowServerOfflineNotice(); });
++    }
++}
++
++void Application::NoteServerReachable() {
++    if (server_offline_.exchange(false, std::memory_order_acq_rel)) {
++        ESP_LOGI(TAG, "Voice server reachable again");
++        Schedule([this]() {
++            offline_backoff_s_ = 0;
++            if (offline_notice_clear_tick_ >= 0) {
++                offline_notice_clear_tick_ = -1;
++                if (GetDeviceState() == kDeviceStateIdle && !privacy_gate_) {
++                    Board::GetInstance().GetDisplay()->SetChatMessage("system", "");
++                }
++            }
++        });
++    }
++}
++
++void Application::ShowServerOfflineNotice() {
++    // Calm, transient, silent: no error status, no error face, no sound.
++    // Never paints over privacy sleep (StateManager owns Sleepy + Zzz) or
++    // a conversation that has since started.
++    if (privacy_gate_ || GetDeviceState() != kDeviceStateIdle) {
++        return;
++    }
++    Board::GetInstance().GetDisplay()->SetChatMessage(
++        "system", "Voice is offline. I'll reconnect when it's back.");
++    offline_notice_clear_tick_ = clock_ticks_ + 6;
++}
++
  void Application::SetAecMode(AecMode mode) {
      aec_mode_ = mode;
      Schedule([this]() {
+@@ -1116,4 +1412,3 @@ void Application::ResetProtocol() {
+         protocol_.reset();
+     });
+ }
+-
 diff --git c/main/application.h w/main/application.h
-index 7ca7af4..de144a3 100644
+index 7ca7af4..d88c3e8 100644
 --- c/main/application.h
 +++ w/main/application.h
-@@ -108,8 +108,21 @@ public:
+@@ -10,6 +10,7 @@
+ #include <mutex>
+ #include <deque>
+ #include <memory>
++#include <atomic>
+ 
+ #include "protocol.h"
+ #include "ota.h"
+@@ -108,8 +109,31 @@ public:
      bool UpgradeFirmware(const std::string& url, const std::string& version = "");
      bool CanEnterSleepMode();
      void SendMcpMessage(const std::string& payload);
@@ -358,10 +602,20 @@ index 7ca7af4..de144a3 100644
 +    // Owner: stackchan StateManager (toggled on enter/exit of SLEEP).
 +    void SetPrivacyGate(bool on);
 +    bool GetPrivacyGate() const { return privacy_gate_; }
++
++    // Dotty (#180): voice-server reachability. The tower stops
++    // xiaozhi-server on purpose (idle watchdog), so "server unreachable"
++    // is a normal resting condition, not a fault. While offline, ambient
++    // (non-user) reconnect attempts — perception SendEvent lazy-opens, the
++    // proactive idle reopen, face-walk-up invokes — are rate-limited by an
++    // exponential backoff; explicit user actions (wake word, button) still
++    // try immediately. Thread-safe.
++    bool AmbientReconnectAllowed() const;
++    bool IsVoiceServerOffline() const { return server_offline_.load(std::memory_order_acquire); }
      void PlaySound(const std::string_view& sound);
      AudioService& GetAudioService() { return audio_service_; }
      
-@@ -140,6 +153,7 @@ private:
+@@ -140,9 +164,22 @@ private:
      bool aborted_ = false;
      bool assets_version_checked_ = false;
      bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
@@ -369,6 +623,21 @@ index 7ca7af4..de144a3 100644
      int clock_ticks_ = 0;
      TaskHandle_t activation_task_handle_ = nullptr;
  
++    // Dotty (#180): voice-server offline state + ambient reconnect backoff.
++    // server_offline_ / next_ambient_reconnect_ms_ are read from other tasks
++    // (face_tracking); the rest is main-task only.
++    std::atomic<bool> server_offline_{false};
++    std::atomic<uint32_t> next_ambient_reconnect_ms_{0};
++    int offline_backoff_s_ = 0;
++    int offline_notice_clear_tick_ = -1;
++    bool ota_check_failed_ = false;  // boot OTA check gave up; protocol uses cached config
++    void NoteServerUnreachable(bool user_visible);
++    void NoteServerReachable();
++    void ShowServerOfflineNotice();
++
+ 
+     // Event handlers
+     void HandleStateChangedEvent();
 diff --git c/main/assets.cc w/main/assets.cc
 index ad61944..6b84daf 100644
 --- c/main/assets.cc
@@ -613,10 +882,35 @@ index 99db546..4e0b5dc 100644
      std::unique_ptr<WakeWord> wake_word_;
      std::unique_ptr<AudioDebugger> audio_debugger_;
 diff --git c/main/audio/wake_words/afe_wake_word.cc w/main/audio/wake_words/afe_wake_word.cc
-index 8fc5fef..f0f3a42 100644
+index 8fc5fef..5c0c47e 100644
 --- c/main/audio/wake_words/afe_wake_word.cc
 +++ w/main/audio/wake_words/afe_wake_word.cc
-@@ -162,6 +162,10 @@ void AfeWakeWord::AudioDetectionTask() {
+@@ -79,6 +79,12 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
+     
+     afe_iface_ = esp_afe_handle_from_config(afe_config);
+     afe_data_ = afe_iface_->create_from_config(afe_config);
++    // Dotty (#179): log the effective AFE/WakeNet config once at init.
++    // wakenet_mode, AGC and the linear gain are defaulted inside the closed
++    // esp-sr library, so a bench distance/angle sweep needs this baseline
++    // before any sensitivity is tuned. Diagnostic only; no behaviour change.
++    ESP_LOGI(TAG, "AFE input format %s (mic gain set by codec)", input_format.c_str());
++    afe_config_print(afe_config);
+ 
+     xTaskCreate([](void* arg) {
+         auto this_ = (AfeWakeWord*)arg;
+@@ -150,6 +156,11 @@ void AfeWakeWord::AudioDetectionTask() {
+         StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
+ 
+         if (res->wakeup_state == WAKENET_DETECTED) {
++            // Dotty (#179): input level (dB, pre-AGC, over the WakeNet
++            // window) of each accepted wake, to compare placements.
++            ESP_LOGI(TAG, "WakeNet detected: volume=%.1f dB word=%d model=%d channel=%d",
++                     res->data_volume, res->wake_word_index, res->wakenet_model_index,
++                     res->trigger_channel_id);
+             Stop();
+             last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
+ 
+@@ -162,6 +173,10 @@ void AfeWakeWord::AudioDetectionTask() {
  
  void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
      // store audio data to wake_word_pcm_
@@ -627,7 +921,7 @@ index 8fc5fef..f0f3a42 100644
      wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
      // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
      while (wake_word_pcm_.size() > 2000 / 30) {
-@@ -171,7 +175,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+@@ -171,7 +186,13 @@ void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
  
  void AfeWakeWord::EncodeWakeWordData() {
      const size_t stack_size = 4096 * 6;
@@ -642,7 +936,7 @@ index 8fc5fef..f0f3a42 100644
      if (wake_word_encode_task_stack_ == nullptr) {
          wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
          assert(wake_word_encode_task_stack_ != nullptr);
-@@ -208,8 +218,19 @@ void AfeWakeWord::EncodeWakeWordData() {
+@@ -208,8 +229,19 @@ void AfeWakeWord::EncodeWakeWordData() {
              std::vector<int16_t> in_buffer;
              esp_audio_enc_in_frame_t in = {};
              esp_audio_enc_out_frame_t out = {};
@@ -664,7 +958,7 @@ index 8fc5fef..f0f3a42 100644
                  if (in_buffer.empty()) {
                      in_buffer = std::move(pcm);
                  } else {
-@@ -238,7 +259,9 @@ void AfeWakeWord::EncodeWakeWordData() {
+@@ -238,7 +270,9 @@ void AfeWakeWord::EncodeWakeWordData() {
                      in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
                  }
              }

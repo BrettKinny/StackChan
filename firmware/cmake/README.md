@@ -1,0 +1,67 @@
+# Dotty managed-component patch
+
+`patch_esp_ml307.cmake` runs after IDF resolves dependencies. It copies only
+`esp_tcp.cc` into the build directory, applies the committed patch with zero
+fuzz, and replaces that one source on the managed component target. Original
+managed files and their checksums remain unchanged. A patch mismatch or missing
+source aborts configuration rather than silently building unpatched firmware.
+
+The patch makes failed TCP receive-task allocation fail the connection with
+`ENOMEM`, closes its socket, and avoids waiting for a nonexistent receiver.
+It records free and largest internal heap blocks to diagnose memory pressure.
+An outgoing socket can otherwise upload a photo successfully while no task
+exists to receive the HTTP response. This mechanism is reproduced by injected
+allocation failure; its role in a particular physical failure still requires
+device evidence.
+
+Run `python firmware/tests/test_esp_tcp_allocation.py` from the repository root.
+The test compiles the real patched source with host FreeRTOS/socket fakes and
+checks failed allocation, socket cleanup, destructor behaviour, successful
+retry, and normal send/disconnect. Add `--unpatched` to demonstrate the upstream
+failure. It needs the fetched managed component, a host C++ compiler, and
+`patch`. It does not simulate ESP-IDF scheduling, heap fragmentation, or Wi-Fi;
+the firmware build and physical A/V tests remain required.
+
+AI-assisted implementation and documentation: GPT-6 (OpenAI).
+
+## Camera ownership regression
+
+`python firmware/tests/test_camera_upload_ownership.py` compiles the actual
+camera upload method with fake camera/HTTP/FreeRTOS boundaries. Add
+`--source-ref ed4161e` to reproduce the earlier double-join and outstanding
+queue: the controlled scheduler completes encoding, lets the face detector's
+actual join prelude join first, then resumes the uploader's second join.
+This deliberately models the observed IDF `EINVAL` result without relying on
+undefined concurrent joins in the host C++ runtime.
+
+The fix encodes into one owned PSRAM JPEG under the camera arbiter and releases
+the arbiter before HTTP operations. It needs neither a shared encoder thread
+nor a queue. Tests assert ownership release after encoding, connection, write,
+HTTP-status and arbiter failures, and successful retry. Physical warm-camera
+repetition and the main-task stack watermark remain necessary acceptance checks;
+this does not remove synchronous HTTP timeout stalls.
+
+## Wake with an ambient-open channel
+
+`python firmware/tests/test_wake_channel_state.py` reconstructs application
+source from upstream `v2.2.4` plus the committed patch, then compiles both real
+wake callers and their continuation against fake audio/transport boundaries.
+`--patch-ref 1b2b0cb` reproduces the previously ignored wake when Idle already
+has an open channel. Closed-channel wake, cancellation after Speaking or privacy
+Sleep, and Sleep arriving during network open are also covered. Sleep remains
+mic-off; the repair does not introduce a voice-wake route from privacy Sleep.
+The test does not emulate FreeRTOS event dispatch or the physical wake model.
+
+## First speech from idle owns Talk
+
+`python firmware/tests/test_voice_speaking_state.py` compiles the real SPEAKING
+display branch, state hooks, transition/event emission and mode tick against
+hardware fakes. `--source-ref 3140f03` reproduces the missing Idle-to-Talk edge.
+The tests cover first speech, two minutes of ticks, listening LED off during
+speech, normal listening/standby recovery, and unchanged sticky/privacy modes.
+
+The new speaking hook does not alter the existing explicit `onFaceLost()`
+Talk-to-Idle transition. A genuine face-lost edge can therefore still relinquish
+Talk during speech; this remains an independent ownership-policy limitation,
+not silently changed by the first-speech repair. Physical A/V acceptance and
+server observation of `state_changed` remain required.
