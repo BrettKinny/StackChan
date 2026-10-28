@@ -1,8 +1,12 @@
 #include "cores3_audio_codec.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
+#include <cstring>
 
 #define TAG "CoreS3AudioCodec"
 
@@ -182,8 +186,35 @@ void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
     ESP_LOGI(TAG, "Duplex channels created");
 }
 
+// Dotty (#196): one failed I2C transaction while the amp or mic powers up
+// ("I2C_If: Fail to read from dev 6c" under speaker load) used to abort in
+// ESP_ERROR_CHECK and reboot the robot. Retry a few times; if the codec still
+// won't open, leave it disabled so this audio is dropped, and let the next
+// enable try again after a short back-off.
+bool CoreS3AudioCodec::OpenDevice(esp_codec_dev_handle_t dev, esp_codec_dev_sample_info_t* fs,
+    int64_t& retry_after_us, const char* name) {
+    if (esp_timer_get_time() < retry_after_us) {
+        return false;
+    }
+    for (int attempt = 1; attempt <= kOpenAttempts; attempt++) {
+        int ret = esp_codec_dev_open(dev, fs);
+        if (ret == ESP_CODEC_DEV_OK) {
+            retry_after_us = 0;
+            return true;
+        }
+        ESP_LOGW(TAG, "%s open failed (%d), attempt %d/%d", name, ret, attempt, kOpenAttempts);
+        // A failed open can leave the device marked open, and the next open
+        // would then return OK without enabling the codec. Close it first.
+        esp_codec_dev_close(dev);
+        vTaskDelay(pdMS_TO_TICKS(kOpenRetryDelayMs));
+    }
+    ESP_LOGE(TAG, "%s stays off; next try in %d ms", name, kOpenBackoffMs);
+    retry_after_us = esp_timer_get_time() + kOpenBackoffMs * 1000LL;
+    return false;
+}
+
 void CoreS3AudioCodec::SetOutputVolume(int volume) {
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(output_dev_, volume));
     AudioCodec::SetOutputVolume(volume);
 }
 
@@ -202,10 +233,12 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
         if (input_reference_) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
+        if (!OpenDevice(input_dev_, &fs, input_retry_after_us_, "Mic")) {
+            return;
+        }
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_close(input_dev_));
     }
     AudioCodec::EnableInput(enable);
 }
@@ -223,10 +256,12 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
             .sample_rate = (uint32_t)output_sample_rate_,
             .mclk_multiple = 0,
         };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+        if (!OpenDevice(output_dev_, &fs, output_retry_after_us_, "Speaker")) {
+            return;
+        }
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_close(output_dev_));
     }
     AudioCodec::EnableOutput(enable);
 }
@@ -234,6 +269,9 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
 int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
     if (input_enabled_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
+    } else {
+        // The mic failed to open (#196): feed silence, not the last buffer.
+        memset(dest, 0, samples * sizeof(int16_t));
     }
     return samples;
 }
