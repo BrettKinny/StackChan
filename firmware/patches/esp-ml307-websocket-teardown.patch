@@ -1,0 +1,19 @@
+--- a/src/web_socket.cc
++++ b/src/web_socket.cc
+@@ -49,6 +49,16 @@
+     if (connected_) {
+         tcp_->Disconnect();
+     }
++    // Dotty (#200): destroy the TCP connection first. Its destructor closes
++    // the socket and waits for the receive task, which may still be inside
++    // OnTcpData(). A server close frame sets connected_ = false and calls
++    // on_disconnected_ from that task; if another task replaces this socket
++    // right then (the wake-from-sleep event reopening the channel), the
++    // implicit member teardown used to free receive_buffer_, current_message_
++    // and the callbacks before tcp_, so the task wrote into freed heap. That
++    // corrupted the TLSF free list: StoreProhibited in tlsf_malloc on the
++    // next connection's first data.
++    tcp_.reset();
+     if (handshake_event_group_) {
+         vEventGroupDelete(handshake_event_group_);
+     }
