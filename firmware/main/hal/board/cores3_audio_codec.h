@@ -18,6 +18,15 @@ private:
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
 
+    // Dotty (#196): codec open retries and the back-off after they all fail.
+    static constexpr int kOpenAttempts = 3;
+    static constexpr int kOpenRetryDelayMs = 20;
+    static constexpr int kOpenBackoffMs = 500;
+    int64_t output_retry_after_us_ = 0;
+    int64_t input_retry_after_us_ = 0;
+
+    bool OpenDevice(esp_codec_dev_handle_t dev, esp_codec_dev_sample_info_t* fs,
+        int64_t& retry_after_us, const char* name);
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
 
     virtual int Read(int16_t* dest, int samples) override;
