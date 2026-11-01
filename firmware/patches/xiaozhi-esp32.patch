@@ -1,5 +1,5 @@
 diff --git c/main/application.cc w/main/application.cc
-index d69d43d..8506f42 100644
+index d69d43d..4eb7b31 100644
 --- c/main/application.cc
 +++ w/main/application.cc
 @@ -9,8 +9,12 @@
@@ -176,7 +176,7 @@ index d69d43d..8506f42 100644
      });
      
      protocol_->OnAudioChannelClosed([this, &board]() {
-@@ -526,7 +629,6 @@ void Application::InitializeProtocol() {
+@@ -526,11 +629,15 @@ void Application::InitializeProtocol() {
              if (strcmp(state->valuestring, "start") == 0) {
                  Schedule([this]() {
                      aborted_ = false;
@@ -184,7 +184,16 @@ index d69d43d..8506f42 100644
                  });
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
-@@ -542,7 +644,10 @@ void Application::InitializeProtocol() {
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
++                        // Dotty (#200 part 2): evidence only. Entering Listening runs
++                        // ResetDecoder, which drops anything still queued.
++                        size_t decode = 0, playback = 0;
++                        audio_service_.GetPlaybackDepth(&decode, &playback);
++                        ESP_LOGW(TAG, "tts stop: unplayed decode=%u playback=%u", (unsigned)decode, (unsigned)playback);
+                         if (listening_mode_ == kListeningModeManualStop) {
+                             SetDeviceState(kDeviceStateIdle);
+                         } else {
+@@ -542,7 +649,10 @@ void Application::InitializeProtocol() {
                  auto text = cJSON_GetObjectItem(root, "text");
                  if (cJSON_IsString(text)) {
                      ESP_LOGI(TAG, "<< %s", text->valuestring);
@@ -196,7 +205,7 @@ index d69d43d..8506f42 100644
                          display->SetChatMessage("assistant", message.c_str());
                      });
                  }
-@@ -553,10 +658,12 @@ void Application::InitializeProtocol() {
+@@ -553,10 +663,12 @@ void Application::InitializeProtocol() {
                  ESP_LOGI(TAG, ">> %s", text->valuestring);
                  Schedule([display, message = std::string(text->valuestring)]() {
                      display->SetChatMessage("user", message.c_str());
@@ -209,7 +218,7 @@ index d69d43d..8506f42 100644
              if (cJSON_IsString(emotion)) {
                  Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                      display->SetEmotion(emotion_str.c_str());
-@@ -610,33 +717,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +722,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -271,7 +280,7 @@ index d69d43d..8506f42 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -711,13 +821,23 @@ void Application::HandleToggleChatEvent() {
+@@ -711,13 +826,23 @@ void Application::HandleToggleChatEvent() {
  }
  
  void Application::ContinueOpenAudioChannel(ListeningMode mode) {
@@ -297,7 +306,7 @@ index d69d43d..8506f42 100644
              return;
          }
      }
-@@ -774,7 +894,7 @@ void Application::HandleStopListeningEvent() {
+@@ -774,7 +899,7 @@ void Application::HandleStopListeningEvent() {
  }
  
  void Application::HandleWakeWordDetectedEvent() {
@@ -306,7 +315,7 @@ index d69d43d..8506f42 100644
          return;
      }
  
-@@ -782,6 +902,22 @@ void Application::HandleWakeWordDetectedEvent() {
+@@ -782,6 +907,22 @@ void Application::HandleWakeWordDetectedEvent() {
      auto wake_word = audio_service_.GetLastWakeWord();
      ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
  
@@ -329,7 +338,7 @@ index d69d43d..8506f42 100644
      if (state == kDeviceStateIdle) {
          audio_service_.EncodeWakeWord();
          auto wake_word = audio_service_.GetLastWakeWord();
-@@ -820,18 +956,32 @@ void Application::HandleWakeWordDetectedEvent() {
+@@ -820,18 +961,32 @@ void Application::HandleWakeWordDetectedEvent() {
  }
  
  void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
@@ -365,7 +374,7 @@ index d69d43d..8506f42 100644
      ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
  #if CONFIG_SEND_WAKE_WORD_DATA
      // Encode and send the wake word data to the server
-@@ -861,21 +1011,43 @@ void Application::HandleStateChangedEvent() {
+@@ -861,21 +1016,43 @@ void Application::HandleStateChangedEvent() {
      auto led = board.GetLed();
      led->OnStateChanged();
      
@@ -410,7 +419,7 @@ index d69d43d..8506f42 100644
              display->SetStatus(Lang::Strings::LISTENING);
              display->SetEmotion("neutral");
  
-@@ -886,7 +1058,7 @@ void Application::HandleStateChangedEvent() {
+@@ -886,7 +1063,7 @@ void Application::HandleStateChangedEvent() {
                  if (listening_mode_ == kListeningModeAutoStop) {
                      audio_service_.WaitForPlaybackQueueEmpty();
                  }
@@ -419,7 +428,7 @@ index d69d43d..8506f42 100644
                  // Send the start listening command
                  protocol_->SendStartListening(listening_mode_);
                  audio_service_.EnableVoiceProcessing(true);
-@@ -907,6 +1079,12 @@ void Application::HandleStateChangedEvent() {
+@@ -907,6 +1084,12 @@ void Application::HandleStateChangedEvent() {
              }
              break;
          case kDeviceStateSpeaking:
@@ -432,7 +441,7 @@ index d69d43d..8506f42 100644
              display->SetStatus(Lang::Strings::SPEAKING);
  
              if (listening_mode_ != kListeningModeRealtime) {
-@@ -1017,7 +1195,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+@@ -1017,7 +1200,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
  }
  
  void Application::WakeWordInvoke(const std::string& wake_word) {
@@ -441,7 +450,7 @@ index d69d43d..8506f42 100644
          return;
      }
  
-@@ -1075,6 +1253,124 @@ void Application::SendMcpMessage(const std::string& payload) {
+@@ -1075,6 +1258,124 @@ void Application::SendMcpMessage(const std::string& payload) {
      });
  }
  
@@ -566,7 +575,7 @@ index d69d43d..8506f42 100644
  void Application::SetAecMode(AecMode mode) {
      aec_mode_ = mode;
      Schedule([this]() {
-@@ -1116,4 +1412,3 @@ void Application::ResetProtocol() {
+@@ -1116,4 +1417,3 @@ void Application::ResetProtocol() {
          protocol_.reset();
      });
  }
@@ -811,7 +820,7 @@ index 3692e0c..7bfbc5c 100644
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
 diff --git c/main/audio/audio_service.cc w/main/audio/audio_service.cc
-index 350ac58..ab2912d 100644
+index 350ac58..de7fdc3 100644
 --- c/main/audio/audio_service.cc
 +++ w/main/audio/audio_service.cc
 @@ -158,12 +158,13 @@ void AudioService::Start() {
@@ -844,8 +853,33 @@ index 350ac58..ab2912d 100644
                  if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
                      wake_word_->Feed(data);
                  }
+@@ -658,6 +665,12 @@ bool AudioService::IsIdle() {
+     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
+ }
+ 
++void AudioService::GetPlaybackDepth(size_t* decode, size_t* playback) {
++    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++    *decode = audio_decode_queue_.size();
++    *playback = audio_playback_queue_.size();
++}
++
+ void AudioService::WaitForPlaybackQueueEmpty() {
+     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+     audio_queue_cv_.wait(lock, [this]() { 
+@@ -667,6 +680,11 @@ void AudioService::WaitForPlaybackQueueEmpty() {
+ 
+ void AudioService::ResetDecoder() {
+     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++    if (!audio_decode_queue_.empty() || !audio_playback_queue_.empty()) {
++        // Dotty (#200): audible speech is discarded here when the device leaves Speaking early.
++        ESP_LOGW(TAG, "ResetDecoder dropping unplayed audio: decode=%u playback=%u",
++                 (unsigned)audio_decode_queue_.size(), (unsigned)audio_playback_queue_.size());
++    }
+     std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
+     if (opus_decoder_ != nullptr) {
+         esp_opus_dec_reset(opus_decoder_);
 diff --git c/main/audio/audio_service.h w/main/audio/audio_service.h
-index 99db546..4e0b5dc 100644
+index 99db546..df03e47 100644
 --- c/main/audio/audio_service.h
 +++ w/main/audio/audio_service.h
 @@ -38,7 +38,7 @@
@@ -857,7 +891,16 @@ index 99db546..4e0b5dc 100644
  #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
  #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
  #define AUDIO_TESTING_MAX_DURATION_MS 10000
-@@ -127,6 +127,14 @@ public:
+@@ -115,6 +115,8 @@ public:
+     const std::string& GetLastWakeWord() const;
+     bool IsVoiceDetected() const { return voice_detected_; }
+     bool IsIdle();
++    // Dotty (#200): unplayed audio still queued (Opus packets / decoded PCM frames).
++    void GetPlaybackDepth(size_t* decode, size_t* playback);
+     void WaitForPlaybackQueueEmpty();
+     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
+     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
+@@ -127,6 +129,14 @@ public:
  
      void SetCallbacks(AudioServiceCallbacks& callbacks);
  
@@ -872,7 +915,7 @@ index 99db546..4e0b5dc 100644
      bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
      std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
      void PlaySound(const std::string_view& sound);
-@@ -137,6 +145,8 @@ public:
+@@ -137,6 +147,8 @@ public:
  private:
      AudioCodec* codec_ = nullptr;
      AudioServiceCallbacks callbacks_;

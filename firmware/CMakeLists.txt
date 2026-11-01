@@ -2,7 +2,7 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "1.3.5")
+set(PROJECT_VER "1.3.5-dev.1101.2")
 add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 
 # Add this line to disable the specific warning
@@ -23,3 +23,4 @@ endif()
 
 # IDF resolves managed dependencies during project(); patch only a build copy.
 include(cmake/patch_esp_ml307.cmake)
+include(cmake/patch_esp_video.cmake)

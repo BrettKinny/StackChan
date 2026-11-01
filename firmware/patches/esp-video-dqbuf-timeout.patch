@@ -1,0 +1,14 @@
+--- a/src/esp_video_ioctl.c
++++ b/src/esp_video_ioctl.c
+@@ -175,7 +175,10 @@
+ static esp_err_t esp_video_ioctl_dqbuf(struct esp_video *video, struct v4l2_buffer *vbuf)
+ {
+     esp_err_t ret;
+-    uint32_t ticks = portMAX_DELAY;
++    /* Dotty (#189): bound the wait. portMAX_DELAY made VIDIOC_DQBUF block for ever
++     * when the sensor delivered no frame, and the VFS has no poll()/O_NONBLOCK to
++     * work around it. A timeout makes the ioctl fail like any other error. */
++    uint32_t ticks = pdMS_TO_TICKS(3000);
+     struct esp_video_buffer_info info;
+     struct esp_video_buffer_element *element;
+ 
