@@ -17,6 +17,7 @@
 #include "board.h"
 #include "display.h"
 #include "stackchan_camera.h"
+#include "bounded_call.h"
 #include <stackchan/face/camera_arbiter.h>
 #include <stackchan/camera/camera_stream_guard.h>
 #include <stackchan/stackchan.h>
@@ -385,6 +386,33 @@ void StackChanCamera::SetExplainUrl(const std::string& url, const std::string& t
     explain_token_ = token;
 }
 
+// #189: esp_video's VIDIOC_DQBUF waits on the frame queue with portMAX_DELAY and
+// its VFS has no poll()/O_NONBLOCK, so a stream that never delivers a frame
+// blocked take_photo for ever with the arbiter, motion lock and stream still
+// held. Run the dequeue on a BoundedCall worker and give up after a deadline.
+static constexpr int kFrameTimeoutMs = 2000;
+static struct v4l2_buffer s_dq_buf;
+
+static bool DequeueFrameBounded(int fd, struct v4l2_buffer* out, int timeout_ms)
+{
+    static BoundedCall* call = new BoundedCall([fd]() {
+        s_dq_buf        = {};
+        s_dq_buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        s_dq_buf.memory = V4L2_MEMORY_MMAP;
+        return ioctl(fd, VIDIOC_DQBUF, &s_dq_buf);
+    });
+    int rc = -1;
+    if (!call->Wait(timeout_ms, &rc)) {
+        ESP_LOGE(TAG, "VIDIOC_DQBUF timed out after %d ms: no frame from the sensor", timeout_ms);
+        return false;
+    }
+    if (rc != 0) {
+        return false;
+    }
+    *out = s_dq_buf;
+    return true;
+}
+
 bool StackChanCamera::Capture()
 {
     // Privacy LED step 3: stamp the moment we begin a capture, regardless
@@ -439,8 +467,8 @@ bool StackChanCamera::Capture()
         struct v4l2_buffer buf = {};
         buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory             = V4L2_MEMORY_MMAP;
-        if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-            ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
+        if (!DequeueFrameBounded(video_fd_, &buf, kFrameTimeoutMs)) {
+            ESP_LOGE(TAG, "VIDIOC_DQBUF failed or timed out");
             return false;
         }
         if (i == 2) {
@@ -919,10 +947,14 @@ bool StackChanCamera::startStreaming()
         TickType_t duration    = 5000 / portTICK_PERIOD_MS;  // 5s
         while ((xTaskGetTickCount() - start) < duration) {
             struct v4l2_buffer buf = {};
-            buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buf.memory             = V4L2_MEMORY_MMAP;
-            if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-                ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
+            if (!DequeueFrameBounded(video_fd_, &buf, kFrameTimeoutMs)) {
+                ESP_LOGE(TAG, "VIDIOC_DQBUF failed or timed out during init");
+                if (capture_count == 0) {
+                    // No frame at all: the sensor is not streaming. Fail the
+                    // start instead of blocking the caller (#189).
+                    ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
+                    return false;
+                }
                 vTaskDelay(10 / portTICK_PERIOD_MS);
                 continue;
             }
@@ -969,8 +1001,8 @@ bool StackChanCamera::StreamCaptures()
         struct v4l2_buffer buf = {};
         buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory             = V4L2_MEMORY_MMAP;
-        if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-            ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
+        if (!DequeueFrameBounded(video_fd_, &buf, kFrameTimeoutMs)) {
+            ESP_LOGE(TAG, "VIDIOC_DQBUF failed or timed out");
             return false;
         }
         {
