@@ -901,6 +901,21 @@ bool StackChanCamera::startStreaming()
         return false;
     }
 
+    // esp_video's STREAMOFF empties the queued-buffer list (TAILQ_INIT + buffer_reset),
+    // and the buffers were only queued once at init. Without re-queueing them here a
+    // stream restarted after sleep has nothing to fill, so every DQBUF times out
+    // ("VIDIOC_DQBUF failed" / "StreamCaptures failed" every 3 s, 0 fps).
+    // Hypothesis from the driver source; QBUF of an already-queued buffer just fails.
+    for (size_t i = 0; i < mmap_buffers_.size(); i++) {
+        struct v4l2_buffer qbuf = {};
+        qbuf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        qbuf.memory             = V4L2_MEMORY_MMAP;
+        qbuf.index              = i;
+        if (ioctl(video_fd_, VIDIOC_QBUF, &qbuf) == 0) {
+            ESP_LOGI(TAG, "re-queued buffer %u before STREAMON", (unsigned)i);
+        }
+    }
+
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
         ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
