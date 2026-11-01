@@ -51,6 +51,7 @@ void Hal::init()
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <esp_log.h>
 #include <esp_mac.h>
 
 void Hal::delay(std::uint32_t ms)
@@ -146,6 +147,9 @@ static void _stackchan_update_task(void* param)
 {
     bool is_xiaozhi_ready = false;
     bool is_setup_done    = false;
+    int slow_ticks        = 0;
+    int64_t slow_max_us   = 0;
+    int64_t slow_log_us   = esp_timer_get_time();
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -154,7 +158,27 @@ static void _stackchan_update_task(void* param)
 
         LvglLockGuard lock;
 
+        // Dotty (#193): during the security sweep the AFE feed ringbuffer overflows
+        // for ~1.8 s at the start of each long slow pan. Time the update tick (it
+        // does the servo-bus I/O under the LVGL lock) so serial shows whether the
+        // stackchan task is hogging CPU 1 while the overflow runs.
+        int64_t update_t0 = esp_timer_get_time();
         GetStackChan().update();
+        int64_t update_us = esp_timer_get_time() - update_t0;
+        if (update_us > slow_max_us) {
+            slow_max_us = update_us;
+        }
+        if (update_us > 15000) {
+            slow_ticks++;
+        }
+        if (esp_timer_get_time() - slow_log_us > 2000000) {
+            if (slow_ticks > 0) {
+                ESP_LOGW("StackChanUpdate", "slow ticks in 2s: n=%d max=%d ms", slow_ticks, (int)(slow_max_us / 1000));
+            }
+            slow_ticks   = 0;
+            slow_max_us  = 0;
+            slow_log_us  = esp_timer_get_time();
+        }
 
         if (!is_xiaozhi_ready) {
             is_xiaozhi_ready = hal_bridge::is_xiaozhi_ready();
